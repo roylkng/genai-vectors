@@ -19,6 +19,8 @@ name = "genai_vectors"
 path = "src/lib.rs"
 
 [dependencies]
+faiss = { version = "0.13.3", default-features = false, features = ["static"] }
+
 # Error handling
 anyhow = "1.0"
 thiserror = "1.0"

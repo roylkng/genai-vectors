@@ -16,6 +16,9 @@ Thumbs.db
 # Logs
 *.log
 logs/
+data/logs/
+*.log.*
+log_*
 
 # Configuration
 config/local.toml
@@ -25,7 +28,18 @@ config/local.toml
 # Data and cache
 data/temp/
 data/logs/
+data/indexes/
 *.pkl.tmp
+
+# Large cache files (keep smaller datasets)
+data/embedding_cache_500k.pkl
+data/*_500k*.pkl
+data/*_1m*.pkl
+data/*_large*.pkl
+
+# Keep these smaller/medium cache files for development:
+# data/embedding_cache_test.pkl (69KB)
+# data/embeddings_cache_5k_s3vectors.pkl (33MB)
 
 # Python
 __pycache__/

@@ -143,9 +143,12 @@ python -m pytest tests/ -v
 
 ### Test Configuration
 Tests use cached vectors stored in `data/` directory:
-- `embedding_cache_test.pkl` - Small test dataset
-- `embeddings_cache_5k_s3vectors.pkl` - 5K vectors for medium tests
-- `embedding_cache_500k.pkl` - 500K vectors for performance tests
+- `embedding_cache_test.pkl` (**69KB**) - Small test dataset (tracked in git)
+- `embeddings_cache_5k_s3vectors.pkl` (**33MB**) - 5K vectors for testing (tracked in git)
+- `embedding_cache_500k.pkl` (**3.3GB**) - 500K vectors for performance tests (git ignored)
+
+> **📝 Note**: Large cache files (500K+) are excluded from git to keep repository size manageable. 
+> See `docs/GITIGNORE_STRATEGY.md` for detailed data management strategy.
 
 ## 📊 API Usage
 
