@@ -51,7 +51,8 @@ aws-sdk-s3  = { version = "1.
 
     
 
-[dev-dependencies]
+[
+dev-dependencies]
 tokio-test= 
 
 [features]
