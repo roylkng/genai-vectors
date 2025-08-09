@@ -2,7 +2,6 @@ use crate::{minio::S3Client, model::*};
 use crate::faiss_utils::{
     build_ivfpq_index, calculate_optimal_nlist, 
     calculate_optimal_pq_params,
-    FaissIndex,
 };
 use crate::metrics::get_metrics_collector;
 use anyhow::{Context, Result};
@@ -89,9 +88,9 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
     get_metrics_collector().track_metric("indexer.shards_created", num_shards as f64);
     get_metrics_collector().track_metric("indexer.vectors_per_shard", (total_vectors as f64) / (num_shards as f64));
     
-    let mut shard_creation_times: Vec<std::time::Duration> = Vec::new();
+    let _shard_creation_times: Vec<std::time::Duration> = Vec::new();
     for shard_index in 0..num_shards {
-        let shard_start = std::time::Instant::now();
+        let _shard_start = std::time::Instant::now();
         let start_idx = shard_index * MAX_VECTORS_PER_SHARD;
         let end_idx = std::cmp::min(start_idx + MAX_VECTORS_PER_SHARD, total_vectors);
         
@@ -122,7 +121,7 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
             &config.metric,
             &shard_vectors,
         )?;
-        let index_creation_time = index_start.elapsed();
+        let _index_creation_time = index_start.elapsed();
         
         // Generate numeric IDs for Faiss from string IDs
         let faiss_ids: Vec<i64> = (0..shard_ids_slice.len() as i64).collect();
@@ -205,29 +204,70 @@ async fn get_or_create_index_config(s3: &S3Client, index_name: &str, dimension: 
             Ok(config)
         }
         Err(e) => {
-            tracing::warn!("Failed to load index config: {}, creating default with optimal Faiss parameters", e);
+            tracing::warn!("Failed to load index config: {}, creating optimized config based on dataset characteristics", e);
             
-            // Calculate optimal parameters for Faiss IVF-PQ based on estimated dataset size
-            let estimated_total_vectors = dimension * 10000; // Rough estimate, will be adjusted
+            // Estimate total dataset size from previous manifests or current batch
+            let estimated_total_vectors = estimate_total_dataset_size(s3, index_name, dimension * 100).await;
+            
+            // Calculate optimal parameters for real Faiss IVF-PQ based on estimated size
             let optimal_nlist = calculate_optimal_nlist(estimated_total_vectors);
+            let (optimal_m, optimal_nbits) = calculate_optimal_pq_params(dimension, 0.85);
             
-            // Create default config with reasonable IVF-PQ parameters  
+            // Ensure nlist is feasible for current data size
+            let feasible_nlist = std::cmp::min(optimal_nlist, dimension / 4); // Conservative bound
+            
             let config = IndexConfig {
                 name: index_name.to_string(),
                 dim: dimension as u32,
                 metric: "cosine".to_string(),
-                nlist: optimal_nlist as u32,
-                m: 8,  // 8 subspaces for PQ
-                nbits: 8,  // 8 bits per subspace
+                nlist: feasible_nlist as u32,
+                m: optimal_m as u32,
+                nbits: optimal_nbits as u32,
             };
             
             let config_data = serde_json::to_vec(&config)?;
             s3.put_object(&config_key, config_data.into()).await?;
-            tracing::info!("Created new Faiss IVF-PQ index config: {}D, {}, nlist={}, PQ={}x{}", 
-                         config.dim, config.metric, config.nlist, config.m, config.nbits);
+            
+            tracing::info!(
+                "Created optimized Faiss IVF-PQ config: {}D, {}, nlist={}, PQ={}x{} (estimated {} total vectors)", 
+                config.dim, config.metric, config.nlist, config.m, config.nbits, estimated_total_vectors
+            );
             Ok(config)
         }
     }
+}
+
+async fn estimate_total_dataset_size(s3: &S3Client, index_name: &str, default_estimate: usize) -> usize {
+    // Try to load existing manifest to get historical data
+    let manifest_key = format!("indexes/{}/manifest.json", index_name);
+    
+    match s3.get_object(&manifest_key).await {
+        Ok(data) => {
+            if let Ok(manifest) = serde_json::from_slice::<IndexManifest>(&data) {
+                // Use existing vector count as base estimate, assume 50% growth
+                let projected_size = (manifest.total_vectors as f64 * 1.5) as usize;
+                tracing::info!("Estimated dataset size from manifest: {} vectors (current: {})", 
+                             projected_size, manifest.total_vectors);
+                return projected_size.max(1000); // Minimum reasonable size
+            }
+        }
+        Err(_) => {
+            // No existing manifest, check for other indexes in the bucket for size patterns
+            if let Ok(staged_objects) = s3.list_objects("staged/").await {
+                let staged_count = staged_objects.len();
+                if staged_count > 0 {
+                    // Estimate based on staging activity: ~1000 vectors per slice
+                    let estimated = staged_count * 1000;
+                    tracing::info!("Estimated dataset size from staged objects: {} vectors ({} slices)", 
+                                 estimated, staged_count);
+                    return estimated.max(1000);
+                }
+            }
+        }
+    }
+    
+    tracing::info!("Using default dataset size estimate: {} vectors", default_estimate);
+    default_estimate
 }
 
 async fn update_index_manifest(s3: &S3Client, index_name: &str, new_shard: ShardInfo, config: &IndexConfig) -> Result<()> {

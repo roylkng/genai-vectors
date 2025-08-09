@@ -1,0 +1,62 @@
+# Multi-stage Dockerfile for GenAI Vector Database Indexer
+FROM rust:1.89-slim as builder
+
+# Install dependencies for building including OpenMP
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    curl \
+    build-essential \
+    cmake \
+    libomp-dev \
+    libopenblas-dev \
+    libblas-dev \
+    liblapack-dev \
+    gfortran \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
+WORKDIR /app
+
+# Copy manifests
+COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
+
+# Copy source code
+COPY src ./src
+
+# Build the application
+RUN cargo build --release --bin genai-vectors
+
+# Runtime stage
+FROM debian:bookworm-slim
+
+# Install runtime dependencies including OpenMP
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    libssl3 \
+    libomp5 \
+    libopenblas0 \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app user
+RUN groupadd -r app && useradd -r -g app app
+
+# Create app directory
+WORKDIR /app
+
+# Copy the binary from builder stage
+COPY --from=builder /app/target/release/genai-vectors /app/
+
+# Copy configuration
+COPY config/ ./config/
+
+# Create data directory
+RUN mkdir -p /data && chown -R app:app /app /data
+
+# Switch to app user
+USER app
+
+# Run the indexer as a job
+CMD ["./genai-vectors", "indexer"]

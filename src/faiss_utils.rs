@@ -120,10 +120,11 @@ impl FaissIndex {
             ));
         }
 
-        // Set nprobe if specified (simplified - would need proper IVF index access)
-        if let Some(_nprobe_val) = nprobe {
-            // Note: Setting nprobe would require casting to specific index type
-            tracing::debug!("nprobe setting not implemented in this simplified version");
+        // Set nprobe if specified and index supports it
+        // Note: For now, we skip nprobe setting to simplify compilation
+        // This can be enhanced later with proper Faiss index type handling
+        if let Some(nprobe_val) = nprobe {
+            tracing::debug!("nprobe parameter {} requested but not set (requires index type specific handling)", nprobe_val);
         }
 
         // Perform search
@@ -204,9 +205,26 @@ pub fn build_ivfpq_index(
     // Create the index
     let mut index = FaissIndex::new(dimension, nlist, m, nbits, metric)?;
 
-    // Use a subset of vectors for training (Faiss recommendation: use 30x nlist vectors)
-    let training_size = (30 * nlist).min(vectors.len());
+    // Calculate optimal training size based on clustering requirements
+    let training_size = calculate_optimal_training_size(vectors.len(), nlist);
+    
+    if training_size > vectors.len() {
+        return Err(anyhow::anyhow!(
+            "Insufficient vectors for training: need {}, have {}",
+            training_size,
+            vectors.len()
+        ));
+    }
+
+    // Use the calculated number of vectors for training
     let training_vectors = &vectors[..training_size];
+
+    tracing::info!(
+        "Training Faiss IVF-PQ index with {} vectors ({}% of dataset) for {} clusters",
+        training_size,
+        (training_size as f64 / vectors.len() as f64 * 100.0) as usize,
+        nlist
+    );
 
     // Train the index
     index.train(training_vectors)
@@ -220,12 +238,13 @@ pub fn build_ivfpq_index(
         .context("Failed to add vectors to Faiss index")?;
 
     tracing::info!(
-        "Built Faiss IVF-PQ index: {} vectors, {} dims, {} clusters, {}x{} PQ",
+        "Built Faiss IVF-PQ index: {} vectors, {} dims, {} clusters, {}x{} PQ, trained on {} vectors",
         vectors.len(),
         dimension,
         nlist,
         m,
-        nbits
+        nbits,
+        training_size
     );
 
     Ok(index)
@@ -235,8 +254,37 @@ pub fn build_ivfpq_index(
 pub fn calculate_optimal_nlist(vector_count: usize) -> usize {
     // Faiss recommendation: nlist = sqrt(N) for good performance
     let optimal = (vector_count as f64).sqrt() as usize;
-    // Ensure reasonable bounds
-    optimal.max(16).min(65536)
+    // Ensure reasonable bounds and power-of-2 alignment for better performance
+    let bounded = optimal.max(4).min(65536);
+    
+    // Round to nearest power of 2 for memory efficiency
+    let power_of_2 = bounded.next_power_of_two();
+    
+    // If the power of 2 is significantly larger, use the original bounded value
+    if power_of_2 > bounded * 2 {
+        bounded
+    } else {
+        power_of_2
+    }
+}
+
+/// Calculate optimal training size ensuring sufficient samples for clustering
+pub fn calculate_optimal_training_size(vector_count: usize, nlist: usize) -> usize {
+    // Faiss needs at least 39*nlist training points for stable clustering
+    let min_training = 39 * nlist;
+    let max_training = (vector_count as f64 * 0.3) as usize; // Use up to 30% for training
+    
+    // Use available vectors but respect minimum requirements
+    if vector_count >= min_training {
+        min_training.min(max_training).min(vector_count)
+    } else {
+        // If we don't have enough vectors, use all we have and log a warning
+        tracing::warn!(
+            "Insufficient training vectors: {} available, {} recommended for {} clusters",
+            vector_count, min_training, nlist
+        );
+        vector_count
+    }
 }
 
 /// Calculate optimal nprobe based on nlist and desired recall

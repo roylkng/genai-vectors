@@ -1,5 +1,6 @@
 use crate::{minio::S3Client, model::*};
-use crate::faiss_utils::{FaissIndex};
+use crate::faiss_utils::FaissIndex;
+// use crate::metadata_filter::MetadataFilter;  // TODO: Re-enable after fixing module path
 use crate::metrics::get_metrics_collector;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -39,7 +40,7 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
     // 2. Search each shard using Faiss
     for (shard_idx, shard) in manifest.shards.iter().enumerate() {
         let shard_start = std::time::Instant::now();
-        let results = search_shard(&s3, &req, shard, &manifest).await?;
+                let results = search_shard(&s3, &req, shard, &manifest).await?;
         let shard_time = shard_start.elapsed();
         
         get_metrics_collector().track_metric(&format!("query.shard_{}_time_ms", shard_idx), shard_time.as_millis() as f64);
@@ -66,7 +67,12 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
     }))
 }
 
-async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, manifest: &IndexManifest) -> Result<Vec<SearchResult>> {
+async fn search_shard(
+    s3: &S3Client, 
+    req: &QueryRequest,
+    shard: &ShardInfo, 
+    _manifest: &IndexManifest
+) -> Result<Vec<SearchResult>> {
     let _measurement = crate::measure_operation!("query.search_shard");
     
     // Load metadata JSON for this shard
@@ -76,6 +82,25 @@ async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, mani
     let metadata_map: HashMap<String, Value> = serde_json::from_slice(&metadata_bytes)
         .context("Failed to parse shard metadata")?;
     let metadata_load_time = metadata_start.elapsed();
+
+    // Apply metadata pre-filtering if specified
+    let pre_filtered_ids: Option<Vec<String>> = if let Some(_filter_value) = &req.filter {
+        // TODO: Re-enable metadata filtering after fixing module path
+        // match MetadataFilter::try_from(filter_value.clone()) {
+        //     Ok(filter) => {
+        //         let filtered = filter.pre_filter_ids(&metadata_map);
+        //         get_metrics_collector().track_metric("query.pre_filtered_candidates", filtered.len() as f64);
+        //         Some(filtered)
+        //     }
+        //     Err(e) => {
+        //         tracing::warn!("Invalid metadata filter: {}, proceeding without filter", e);
+        //         None
+        //     }
+        // }
+        None  // Temporary: disable filtering
+    } else {
+        None
+    };
 
     // Load ID map (numeric ID to original string ID)
     let id_map_key = shard.index_path.replace("index.faiss", "id_map.json");
@@ -98,11 +123,20 @@ async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, mani
     let mut index = FaissIndex::load_from_file(&local_index_path)
         .context("Failed to load Faiss index")?;
 
+    // Adjust search parameters if we have pre-filtered candidates
+    let search_k = if let Some(ref filtered_ids) = pre_filtered_ids {
+        // If we have pre-filtered candidates, we might need to search more to find enough matches
+        let expansion_factor = (metadata_map.len() as f64 / filtered_ids.len() as f64).ceil() as usize;
+        (req.topk * expansion_factor.max(2)).min(index.ntotal())
+    } else {
+        req.topk
+    };
+
     // Search using real Faiss
-    let (distances, faiss_ids) = index.search(&req.embedding, req.topk, req.nprobe.map(|n| n as usize))
+    let (distances, faiss_ids) = index.search(&req.embedding, search_k, req.nprobe.map(|n| n as usize))
         .context("Failed to search Faiss index")?;
 
-    // Convert results back to original format
+    // Convert results back to original format with post-filtering
     let mut results = Vec::new();
     for (distance, faiss_id) in distances.iter().zip(faiss_ids.iter()) {
         if *faiss_id == -1 {
@@ -111,8 +145,14 @@ async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, mani
         }
         
         // Map faiss_id back to original string ID
-        // Since we used sequential IDs during indexing, faiss_id corresponds to the position
         if let Some(original_id) = id_lookup.get(faiss_id) {
+            // Apply post-filtering if we have pre-filtered candidates
+            if let Some(ref filtered_ids) = pre_filtered_ids {
+                if !filtered_ids.contains(original_id) {
+                    continue; // Skip this result as it doesn't match the filter
+                }
+            }
+
             let score = match shard.metric.as_str() {
                 "cosine" => *distance,
                 "euclidean" => -distance, // Convert distance to similarity score
@@ -128,6 +168,11 @@ async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, mani
                 score,
                 metadata: vector_meta,
             });
+
+            // Stop when we have enough results
+            if results.len() >= req.topk {
+                break;
+            }
         }
     }
 

@@ -48,7 +48,7 @@ async fn query(
     Json(req): Json<QueryRequest>
 ) -> impl IntoResponse {
     match crate::query::search(state.s3, req).await {
-        Ok(resp) => Json(resp).into_response(),
+        Ok(resp) => Json::<serde_json::Value>(resp).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Query failed: {}", e)).into_response(),
     }
 }

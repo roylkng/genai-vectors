@@ -6,6 +6,7 @@ pub mod api;
 pub mod faiss_utils;
 pub mod indexer;
 pub mod ingest;
+pub mod metadata_filter;
 pub mod metrics;
 pub mod minio;
 pub mod model;

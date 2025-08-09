@@ -1,0 +1,34 @@
+apiVersion: skaffold/v4beta8
+kind: Config
+metadata:
+  name: vector-store
+build:
+  artifacts:
+  - image: vector-store-api
+    context: .
+    docker:
+      dockerfile: Dockerfile.api
+    platforms:
+      - "linux/arm64"
+  - image: vector-store-indexer
+    context: .
+    docker:
+      dockerfile: Dockerfile.indexer
+    platforms:
+      - "linux/arm64"
+deploy:
+  helm:
+    releases:
+    - name: vector-store
+      chartPath: charts/vector-store
+      valuesFiles:
+      - charts/vector-store/values.yaml
+      setValues:
+        api.image.repository: vector-store-api
+        indexer.image.repository: vector-store-indexer
+      wait: true
+portForward:
+- resourceType: service
+  resourceName: vector-store-api
+  port: 8080
+  localPort: 8080
