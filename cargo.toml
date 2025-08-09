@@ -19,8 +19,8 @@ name = "genai_vectors"
 path = "src/lib.rs"
 
 [dependencies]
-# faiss = { version = "0.12.1", default-features = false, features = ["static"] }
-# Commenting out Faiss for now due to OpenMP dependency on macOS
+# Real Faiss integration for production
+faiss = { version = "0.12.1", default-features = false, features = ["static"] }
 
 # Error handling
 anyhow = "1.0"
@@ -53,4 +53,12 @@ tokio-test = "0.4"
 
 [features]
 default = ["s3"]
-s3 = ["aws-config", "aws-sdk-s3"]
+s3 = ["aws-sdk-s3", "aws-config"]
+
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-L", "/opt/homebrew/opt/libomp/lib",
+  "-l", "dylib=omp",
+  "-C", "link-arg=-Wl,-rpath,/opt/homebrew/opt/libomp/lib"
+]
+

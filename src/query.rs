@@ -1,10 +1,18 @@
 use crate::{minio::S3Client, model::*};
-use crate::faiss_utils;
+use crate::faiss_utils::{FaissIndex};
+use crate::metrics::get_metrics_collector;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
 
 pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
+    let _measurement = crate::measure_operation!("query.search");
+    let search_start = std::time::Instant::now();
+    
+    // Track query parameters
+    get_metrics_collector().track_metric("query.topk", req.topk as f64);
+    get_metrics_collector().track_metric("query.vector_dimension", req.embedding.len() as f64);
+    
     // 1. Load index manifest to find active shards
     let manifest_key = format!("indexes/{}/manifest.json", req.index);
     
@@ -12,6 +20,7 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
         Ok(data) => data,
         Err(_) => {
             // No index exists yet, return empty results
+            get_metrics_collector().track_metric("query.index_not_found", 1.0);
             return Ok(serde_json::json!({
                 "results": [],
                 "took_ms": 0
@@ -22,12 +31,20 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
     let manifest: IndexManifest = serde_json::from_slice(&manifest_data)
         .context("Failed to parse index manifest")?;
 
+    get_metrics_collector().track_metric("query.shards_count", manifest.shards.len() as f64);
+
     let start = std::time::Instant::now();
     let mut all_results = Vec::new();
 
     // 2. Search each shard using Faiss
-    for shard in &manifest.shards {
+    for (shard_idx, shard) in manifest.shards.iter().enumerate() {
+        let shard_start = std::time::Instant::now();
         let results = search_shard(&s3, &req, shard, &manifest).await?;
+        let shard_time = shard_start.elapsed();
+        
+        get_metrics_collector().track_metric(&format!("query.shard_{}_time_ms", shard_idx), shard_time.as_millis() as f64);
+        get_metrics_collector().track_metric(&format!("query.shard_{}_results", shard_idx), results.len() as f64);
+        
         all_results.extend(results);
     }
 
@@ -38,6 +55,10 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
     all_results.truncate(req.topk);
 
     let took_ms = start.elapsed().as_millis();
+    let total_search_time = search_start.elapsed();
+    
+    get_metrics_collector().track_metric("query.total_time_ms", total_search_time.as_millis() as f64);
+    get_metrics_collector().track_metric("query.results_returned", all_results.len() as f64);
 
     Ok(serde_json::json!({
         "results": all_results,
@@ -46,11 +67,15 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
 }
 
 async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, manifest: &IndexManifest) -> Result<Vec<SearchResult>> {
+    let _measurement = crate::measure_operation!("query.search_shard");
+    
     // Load metadata JSON for this shard
+    let metadata_start = std::time::Instant::now();
     let metadata_bytes = s3.get_object(&shard.metadata_path).await
         .context("Failed to load shard metadata")?;
     let metadata_map: HashMap<String, Value> = serde_json::from_slice(&metadata_bytes)
         .context("Failed to parse shard metadata")?;
+    let metadata_load_time = metadata_start.elapsed();
 
     // Load ID map (numeric ID to original string ID)
     let id_map_key = shard.index_path.replace("index.faiss", "id_map.json");
@@ -59,33 +84,23 @@ async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, mani
     let id_map: Vec<(i64, String)> = serde_json::from_slice(&id_map_bytes)
         .context("Failed to parse id map")?;
     let id_lookup: HashMap<i64, String> = id_map.into_iter().collect();
+    
+    get_metrics_collector().track_metric("query.metadata_load_time_ms", metadata_load_time.as_millis() as f64);
+    get_metrics_collector().track_metric("query.id_map_size", id_lookup.len() as f64);
 
-    // Load Mock Faiss index
-    // Download index file to a temporary location
+    // Load index using real Faiss
     let index_bytes = s3.get_object(&shard.index_path).await
         .context("Failed to download index file")?;
     let local_index_path = format!("/tmp/{}.faiss", shard.shard_id);
     std::fs::write(&local_index_path, &index_bytes)
         .context("Failed to write temp index file")?;
     
-    let mut index = faiss_utils::load_index(&local_index_path)
-        .context("Failed to load mock Faiss index")?;
+    let mut index = FaissIndex::load_from_file(&local_index_path)
+        .context("Failed to load Faiss index")?;
 
-    // Determine nprobe value (from request, manifest default, or calculated)
-    let nprobe = req.nprobe
-        .or(manifest.default_nprobe)
-        .or_else(|| {
-            // Calculate a reasonable nprobe if not specified
-            Some(faiss_utils::calculate_optimal_nprobe(100)) // Default assumption
-        });
-
-    // Search using Mock Faiss
-    let (distances, faiss_ids) = faiss_utils::search_index(
-        &mut index, 
-        &req.embedding, 
-        req.topk, 
-        nprobe
-    ).context("Failed to search mock Faiss index")?;
+    // Search using real Faiss
+    let (distances, faiss_ids) = index.search(&req.embedding, req.topk, req.nprobe.map(|n| n as usize))
+        .context("Failed to search Faiss index")?;
 
     // Convert results back to original format
     let mut results = Vec::new();
@@ -95,10 +110,12 @@ async fn search_shard(s3: &S3Client, req: &QueryRequest, shard: &ShardInfo, mani
             continue;
         }
         
+        // Map faiss_id back to original string ID
+        // Since we used sequential IDs during indexing, faiss_id corresponds to the position
         if let Some(original_id) = id_lookup.get(faiss_id) {
             let score = match shard.metric.as_str() {
-                "cosine" => *distance, // Mock Faiss already returns similarity for cosine
-                "euclidean" => *distance, // Mock implementation handles this
+                "cosine" => *distance,
+                "euclidean" => -distance, // Convert distance to similarity score
                 _ => *distance,
             };
 
@@ -125,7 +142,6 @@ struct IndexManifest {
     index_name: String,
     dim: u32,
     metric: String,
-    default_nprobe: Option<u32>,
     shards: Vec<ShardInfo>,
     total_vectors: usize,
 }

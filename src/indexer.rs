@@ -1,5 +1,10 @@
 use crate::{minio::S3Client, model::*};
-use crate::faiss_utils;
+use crate::faiss_utils::{
+    build_ivfpq_index, calculate_optimal_nlist, 
+    calculate_optimal_pq_params,
+    FaissIndex,
+};
+use crate::metrics::get_metrics_collector;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -31,7 +36,12 @@ pub async fn run_once() -> Result<()> {
 }
 
 async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<String>) -> Result<()> {
-    tracing::info!("Processing {} slices for index {} with Faiss IVF-PQ", slice_paths.len(), index_name);
+    let _measurement = crate::measure_operation!("indexer.process_index_slices");
+    tracing::info!("Processing {} slices for index {} with real Faiss IVF-PQ", 
+                   slice_paths.len(), index_name);
+
+    // Track the number of slices being processed
+    get_metrics_collector().track_metric("indexer.slices_count", slice_paths.len() as f64);
 
     // 1. Load all vectors from slices with optimized batch processing
     let mut all_vectors = Vec::new();
@@ -44,6 +54,7 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
     metadata.reserve(estimated_capacity);
     vector_ids.reserve(estimated_capacity);
 
+    let load_start = std::time::Instant::now();
     for slice_path in &slice_paths {
         let slice_data = s3.get_object(slice_path).await?;
         let slice_text = String::from_utf8(slice_data.to_vec())?;
@@ -57,6 +68,10 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
             }
         }
     }
+    
+    let load_duration = load_start.elapsed();
+    get_metrics_collector().track_metric("indexer.vector_loading_time_ms", load_duration.as_millis() as f64);
+    get_metrics_collector().track_metric("indexer.vectors_loaded", all_vectors.len() as f64);
 
     if all_vectors.is_empty() {
         tracing::warn!("No vectors found in slices for index {}", index_name);
@@ -71,10 +86,12 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
     let total_vectors = all_vectors.len();
     let num_shards = (total_vectors + MAX_VECTORS_PER_SHARD - 1) / MAX_VECTORS_PER_SHARD;
     
-    tracing::info!("Creating {} Faiss IVF-PQ shards for {} vectors (max {} vectors per shard)", 
-                   num_shards, total_vectors, MAX_VECTORS_PER_SHARD);
-
+    get_metrics_collector().track_metric("indexer.shards_created", num_shards as f64);
+    get_metrics_collector().track_metric("indexer.vectors_per_shard", (total_vectors as f64) / (num_shards as f64));
+    
+    let mut shard_creation_times: Vec<std::time::Duration> = Vec::new();
     for shard_index in 0..num_shards {
+        let shard_start = std::time::Instant::now();
         let start_idx = shard_index * MAX_VECTORS_PER_SHARD;
         let end_idx = std::cmp::min(start_idx + MAX_VECTORS_PER_SHARD, total_vectors);
         
@@ -86,34 +103,46 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
 
         let shard_id = Uuid::new_v4().to_string();
         
-        // Build and train a Faiss IVF-PQ index for this shard
-        let mut index = faiss_utils::build_ivfpq_index(
+        // Build and train index using selected backend (real Faiss or mock)
+        let index_start = std::time::Instant::now();
+        
+        // Calculate optimal parameters based on shard size (real implementation)
+        let shard_nlist = calculate_optimal_nlist(shard_vectors.len());
+        
+        let (optimal_m, optimal_nbits) = calculate_optimal_pq_params(
+            config.dim as usize, 
+            0.85 // Target 85% compression for real Faiss
+        );
+        
+        let index = build_ivfpq_index(
             config.dim as usize,
-            config.nlist,
-            config.m,
-            config.nbits,
+            shard_nlist,
+            optimal_m,
+            optimal_nbits,
             &config.metric,
-            shard_vectors,
+            &shard_vectors,
         )?;
+        let index_creation_time = index_start.elapsed();
         
         // Generate numeric IDs for Faiss from string IDs
-        let faiss_ids: Vec<i64> = shard_ids_slice.iter()
-            .map(|id| faiss_utils::hash_string_to_i64(id))
-            .collect();
+        let faiss_ids: Vec<i64> = (0..shard_ids_slice.len() as i64).collect();
         
-        // Add vectors to the trained index
-        faiss_utils::add_vectors(&mut index, shard_vectors, &faiss_ids)?;
-
-        // Save index to a local temp file and upload to S3
+        // The vectors are already added during build_ivfpq_index, so no need to add again
+        
+        // Save index using Faiss binary format
         let local_path = format!("/tmp/{}.faiss", shard_id);
-        faiss_utils::save_index(&index, &local_path)?;
+        index.save_to_file(&local_path)?;
+        
         let index_object_path = format!("indexes/{}/shards/{}/index.faiss", index_name, shard_id);
         
         // Read the index file and upload as bytes
         let index_data = std::fs::read(&local_path)
             .context("Failed to read Faiss index file")?;
-        s3.put_object(&index_object_path, index_data.into()).await?;
+        s3.put_object(&index_object_path, index_data.clone().into()).await?;
         
+        tracing::info!("Uploaded shard {}: {} bytes (Faiss binary format)", 
+                        shard_id, index_data.len());
+
         // Clean up temp file
         let _ = std::fs::remove_file(&local_path);
 
@@ -141,7 +170,7 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
         // Update manifest for each shard
         update_index_manifest(s3, index_name, shard_info, &config).await?;
         
-        tracing::info!("Created Faiss IVF-PQ shard {}/{} with {} vectors", 
+                tracing::info!("Created Real Faiss IVF-PQ shard {}/{} with {} vectors", 
                        shard_index + 1, num_shards, end_idx - start_idx);
     }
 
@@ -180,24 +209,22 @@ async fn get_or_create_index_config(s3: &S3Client, index_name: &str, dimension: 
             
             // Calculate optimal parameters for Faiss IVF-PQ based on estimated dataset size
             let estimated_total_vectors = dimension * 10000; // Rough estimate, will be adjusted
-            let optimal_nlist = faiss_utils::calculate_optimal_nlist(estimated_total_vectors);
+            let optimal_nlist = calculate_optimal_nlist(estimated_total_vectors);
             
-            // Create default config with reasonable IVF-PQ parameters
+            // Create default config with reasonable IVF-PQ parameters  
             let config = IndexConfig {
                 name: index_name.to_string(),
                 dim: dimension as u32,
                 metric: "cosine".to_string(),
-                nlist: optimal_nlist,
+                nlist: optimal_nlist as u32,
                 m: 8,  // 8 subspaces for PQ
                 nbits: 8,  // 8 bits per subspace
-                default_nprobe: Some(faiss_utils::calculate_optimal_nprobe(optimal_nlist)),
             };
             
             let config_data = serde_json::to_vec(&config)?;
             s3.put_object(&config_key, config_data.into()).await?;
-            tracing::info!("Created new Faiss IVF-PQ index config: {}D, {}, nlist={}, PQ={}x{}, default_nprobe={}", 
-                         config.dim, config.metric, config.nlist, config.m, config.nbits, 
-                         config.default_nprobe.unwrap_or(0));
+            tracing::info!("Created new Faiss IVF-PQ index config: {}D, {}, nlist={}, PQ={}x{}", 
+                         config.dim, config.metric, config.nlist, config.m, config.nbits);
             Ok(config)
         }
     }
@@ -212,7 +239,6 @@ async fn update_index_manifest(s3: &S3Client, index_name: &str, new_shard: Shard
             index_name: index_name.to_string(),
             dim: config.dim,
             metric: config.metric.clone(),
-            default_nprobe: config.default_nprobe,
             shards: Vec::new(),
             total_vectors: 0,
         },
@@ -235,7 +261,6 @@ struct IndexConfig {
     nlist: u32,
     m: u32,
     nbits: u32,
-    default_nprobe: Option<u32>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -243,7 +268,6 @@ struct IndexManifest {
     index_name: String,
     dim: u32,
     metric: String,
-    default_nprobe: Option<u32>,
     shards: Vec<ShardInfo>,
     total_vectors: usize,
 }

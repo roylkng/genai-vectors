@@ -1,10 +1,10 @@
 use anyhow::{Context, Result};
-use faiss::{Index, index::IndexImpl, MetricType, Idx};
+use faiss::{Index, IndexImpl, MetricType};
 use std::path::Path;
 
 /// Real Faiss IVF-PQ Index wrapper for production vector search
 pub struct FaissIndex {
-    index: IndexImpl,
+    index: Box<dyn Index>,
     dimension: usize,
     metric_type: MetricType,
     nlist: usize,
@@ -27,12 +27,12 @@ impl FaissIndex {
             _ => return Err(anyhow::anyhow!("Unsupported metric: {}", metric)),
         };
 
-        // Create IVF-PQ index using index_factory
-        let index_description = format!("IVF{},PQ{}x{}", nlist, m, nbits);
-        let index = faiss::index_factory(dimension as u32, &index_description, metric_type)?;
+        // Create IVF-PQ index: IndexIVFPQ(quantizer, d, nlist, m, nbits)
+        let quantizer = faiss::index_factory(dimension, "Flat", Some(metric_type))?;
+        let index = faiss::IndexIVFPQ::new(quantizer, dimension, nlist, m, nbits, metric_type)?;
 
         Ok(FaissIndex {
-            index,
+            index: Box::new(index),
             dimension,
             metric_type,
             nlist,
@@ -54,7 +54,7 @@ impl FaissIndex {
             .collect();
 
         // Train the index
-        self.index.train(&flat_vectors)?;
+        self.index.train(training_vectors.len(), &flat_vectors)?;
         
         tracing::info!(
             "Trained Faiss IVF-PQ index: {} vectors, {} dimensions, {} clusters, {}x{} PQ",
@@ -100,18 +100,15 @@ impl FaissIndex {
             .flat_map(|v| v.iter().cloned())
             .collect();
 
-        // Convert i64 to faiss::Idx - using unsafe cast for compatibility
-        let faiss_ids: Vec<Idx> = ids.iter().map(|&id| unsafe { std::mem::transmute(id) }).collect();
-
         // Add vectors with IDs to the index
-        self.index.add_with_ids(&flat_vectors, &faiss_ids)?;
+        self.index.add_with_ids(vectors.len(), &flat_vectors, ids)?;
 
         tracing::debug!("Added {} vectors to Faiss index", vectors.len());
         Ok(())
     }
 
     /// Search the index for the k nearest neighbors
-    pub fn search(&mut self, query_vector: &[f32], k: usize, nprobe: Option<usize>) -> Result<(Vec<f32>, Vec<i64>)> {
+    pub fn search(&self, query_vector: &[f32], k: usize, nprobe: Option<usize>) -> Result<(Vec<f32>, Vec<i64>)> {
         if query_vector.len() != self.dimension {
             return Err(anyhow::anyhow!(
                 "Query vector dimension {} does not match index dimension {}",
@@ -120,20 +117,21 @@ impl FaissIndex {
             ));
         }
 
-        // Set nprobe if specified (simplified - would need proper IVF index access)
-        if let Some(_nprobe_val) = nprobe {
-            // Note: Setting nprobe would require casting to specific index type
-            tracing::debug!("nprobe setting not implemented in this simplified version");
+        // Set nprobe if specified
+        if let Some(nprobe_val) = nprobe {
+            if let Some(ivf_index) = self.index.as_any().downcast_ref::<faiss::IndexIVF>() {
+                ivf_index.set_nprobe(nprobe_val);
+            }
         }
 
         // Perform search
-        let search_result = self.index.search(query_vector, k)?;
+        let mut distances = vec![0.0f32; k];
+        let mut labels = vec![0i64; k];
 
-        // Convert faiss::Idx to i64 - using unsafe cast for compatibility
-        let labels: Vec<i64> = search_result.labels.iter().map(|&idx| unsafe { std::mem::transmute(idx) }).collect();
+        self.index.search(1, query_vector, k, &mut distances, &mut labels)?;
 
         // Filter out invalid results (Faiss returns -1 for missing results)
-        let valid_results: Vec<(f32, i64)> = search_result.distances
+        let valid_results: Vec<(f32, i64)> = distances
             .into_iter()
             .zip(labels.into_iter())
             .filter(|(_, label)| *label >= 0)
@@ -146,18 +144,14 @@ impl FaissIndex {
 
     /// Save the index to a file
     pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<()> {
-        let path_str = path.as_ref().to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
-        faiss::write_index(&self.index, path_str)?;
+        faiss::write_index(&*self.index, path.as_ref())?;
         tracing::info!("Saved Faiss index to {}", path.as_ref().display());
         Ok(())
     }
 
     /// Load an index from a file
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
-        let path_str = path.as_ref().to_str()
-            .ok_or_else(|| anyhow::anyhow!("Invalid path"))?;
-        let index = faiss::read_index(path_str)?;
+        let index = faiss::read_index(path.as_ref())?;
         
         // Extract index parameters (this is simplified - in practice you'd store these in metadata)
         let dimension = index.d() as usize;
@@ -284,23 +278,4 @@ pub fn calculate_optimal_pq_params(dimension: usize, target_compression: f64) ->
     };
 
     (m, nbits)
-}
-
-/// Add vectors to an existing index
-pub fn add_vectors(
-    index: &mut FaissIndex,
-    vectors: &[Vec<f32>],
-    ids: &[i64],
-) -> Result<()> {
-    index.add_vectors(vectors, ids)
-}
-
-/// Search an index for similar vectors
-pub fn search_index(
-    index: &mut FaissIndex,
-    query: &[f32],
-    k: usize,
-    nprobe: Option<usize>,
-) -> Result<(Vec<f32>, Vec<i64>)> {
-    index.search(query, k, nprobe)
 }
