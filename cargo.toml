@@ -55,10 +55,5 @@ tokio-test = "0.4"
 default = ["s3"]
 s3 = ["aws-sdk-s3", "aws-config"]
 
-[target.aarch64-apple-darwin]
-rustflags = [
-  "-L", "/opt/homebrew/opt/libomp/lib",
-  "-l", "dylib=omp",
-  "-C", "link-arg=-Wl,-rpath,/opt/homebrew/opt/libomp/lib"
-]
+
 
