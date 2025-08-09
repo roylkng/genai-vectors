@@ -1,0 +1,37 @@
+apiVersion: skaffold/v4beta8
+kind: Config
+metadata:
+  name: vector-store-poc
+build:
+  artifacts:
+  - image: vector-store-api
+    context: .
+    docker:
+      dockerfile: Dockerfile.api
+  - image: vector-store-indexer
+    context: .
+    docker:
+      dockerfile: Dockerfile.indexer
+deploy:
+  helm:
+    releases:
+    - name: vector-store
+      chartPath: charts/vector-store
+      setValueTemplates:
+        api.image: vector-store-api
+        indexer.image: vector-store-indexer
+    - name: minio
+      remoteChart: bitnami/minio
+      valuesFiles:
+      - k8s/minio.values.yaml
+portForward:
+- resourceType: Service
+  resourceName: minio
+  namespace: default
+  port: 9000
+  localPort: 9000
+- resourceType: Service
+  resourceName: vector-store-api
+  namespace: default
+  port: 8080
+  localPort: 8080

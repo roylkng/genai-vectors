@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "vector-store.fullname" . }}-indexer
+  labels:
+    {{- include "vector-store.labels" . | nindent 4 }}
+    app.kubernetes.io/component: indexer
+spec:
+  schedule: {{ .Values.indexer.schedule | quote }}
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            {{- include "vector-store.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: indexer
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: indexer
+              image: "{{ .Values.indexer.image }}:{{ .Values.indexer.tag }}"
+              imagePullPolicy: {{ .Values.indexer.pullPolicy }}
+              env:
+                {{- range $key, $value := .Values.environment }}
+                - name: {{ $key }}
+                  value: {{ $value | quote }}
+                {{- end }}
+              resources:
+                {{- toYaml .Values.resources.indexer | nindent 16 }}

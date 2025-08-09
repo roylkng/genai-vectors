@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  genai-vectors:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - RUST_LOG=info
+      - CONFIG_PATH=/app/config/development.toml
+    volumes:
+      - ./data:/data
+      - ./config:/app/config
+    depends_on:
+      - minio
+    networks:
+      - genai-network
+
+  minio:
+    image: minio/minio:latest
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin123
+    volumes:
+      - minio_data:/data
+    command: server /data --console-address ":9001"
+    networks:
+      - genai-network
+
+  # Optional: Redis for caching
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - genai-network
+
+volumes:
+  minio_data:
+  redis_data:
+
+networks:
+  genai-network:
+    driver: bridge

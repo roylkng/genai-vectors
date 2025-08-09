@@ -1,0 +1,39 @@
+# Development Configuration
+
+[aws]
+# AWS credentials (optional - will use environment variables if not set)
+# access_key_id = "your_access_key"
+# secret_access_key = "your_secret_key"
+# session_token = "your_session_token"  # Optional for temporary credentials
+
+[server]
+host = "0.0.0.0"
+port = 8080
+log_level = "debug"
+
+[storage]
+bucket_name = "genai-vectors-dev"
+region = "us-east-1"
+endpoint = "http://localhost:9000"  # MinIO for local development
+
+[vector]
+default_dimension = 256
+default_batch_size = 1000
+default_top_k = 10
+default_metric = "cosine"
+
+[cache]
+vector_cache_dir = "./data"
+enable_cache = true
+cache_size_mb = 1024
+
+[indexing]
+shard_size = 10000
+max_shards_per_index = 100
+enable_background_indexing = true
+
+[test]
+bucket_prefix = "genai-vectors-test-dev"
+dimension = 128
+small_scale_vectors = 1000
+large_scale_vectors = 500000
