@@ -1,4 +1,5 @@
 use crate::{minio::S3Client, model::*};
+use crate::faiss_utils;
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -30,7 +31,7 @@ pub async fn run_once() -> Result<()> {
 }
 
 async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<String>) -> Result<()> {
-    tracing::info!("Processing {} slices for index {} (optimized)", slice_paths.len(), index_name);
+    tracing::info!("Processing {} slices for index {} with Faiss IVF-PQ", slice_paths.len(), index_name);
 
     // 1. Load all vectors from slices with optimized batch processing
     let mut all_vectors = Vec::new();
@@ -65,12 +66,12 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
     // 2. Get index configuration (dimension, metric, etc.)
     let config = get_or_create_index_config(s3, index_name, all_vectors[0].len()).await?;
 
-    // 3. Create multiple shards with optimized size limit (reduce from 50k to 10k for better performance)
-    const MAX_VECTORS_PER_SHARD: usize = 10_000;  // Optimized for better search performance
+    // 3. Create multiple shards with Faiss IVF-PQ indexing
+    const MAX_VECTORS_PER_SHARD: usize = 50_000;  // Larger shards for better Faiss performance
     let total_vectors = all_vectors.len();
     let num_shards = (total_vectors + MAX_VECTORS_PER_SHARD - 1) / MAX_VECTORS_PER_SHARD;
     
-    tracing::info!("Creating {} shards for {} vectors (max {} vectors per shard - optimized)", 
+    tracing::info!("Creating {} Faiss IVF-PQ shards for {} vectors (max {} vectors per shard)", 
                    num_shards, total_vectors, MAX_VECTORS_PER_SHARD);
 
     for shard_index in 0..num_shards {
@@ -78,18 +79,69 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
         let end_idx = std::cmp::min(start_idx + MAX_VECTORS_PER_SHARD, total_vectors);
         
         let shard_vectors = &all_vectors[start_idx..end_idx];
-        let shard_ids = &vector_ids[start_idx..end_idx];
-        let shard_metadata: HashMap<String, Value> = shard_ids.iter()
+        let shard_ids_slice = &vector_ids[start_idx..end_idx];
+        let shard_metadata: HashMap<String, Value> = shard_ids_slice.iter()
             .filter_map(|id| metadata.get(id).map(|meta| (id.clone(), meta.clone())))
             .collect();
 
         let shard_id = Uuid::new_v4().to_string();
-        let shard_info = create_shard(s3, index_name, &shard_id, shard_vectors, shard_ids, &shard_metadata, &config).await?;
         
-        // 4. Update manifest for each shard
+        // Build and train a Faiss IVF-PQ index for this shard
+        let mut index = faiss_utils::build_ivfpq_index(
+            config.dim as usize,
+            config.nlist,
+            config.m,
+            config.nbits,
+            &config.metric,
+            shard_vectors,
+        )?;
+        
+        // Generate numeric IDs for Faiss from string IDs
+        let faiss_ids: Vec<i64> = shard_ids_slice.iter()
+            .map(|id| faiss_utils::hash_string_to_i64(id))
+            .collect();
+        
+        // Add vectors to the trained index
+        faiss_utils::add_vectors(&mut index, shard_vectors, &faiss_ids)?;
+
+        // Save index to a local temp file and upload to S3
+        let local_path = format!("/tmp/{}.faiss", shard_id);
+        faiss_utils::save_index(&index, &local_path)?;
+        let index_object_path = format!("indexes/{}/shards/{}/index.faiss", index_name, shard_id);
+        
+        // Read the index file and upload as bytes
+        let index_data = std::fs::read(&local_path)
+            .context("Failed to read Faiss index file")?;
+        s3.put_object(&index_object_path, index_data.into()).await?;
+        
+        // Clean up temp file
+        let _ = std::fs::remove_file(&local_path);
+
+        // Write mapping from hashed numeric ID to original string ID
+        let id_map: Vec<(i64, String)> = faiss_ids.iter().cloned()
+            .zip(shard_ids_slice.iter().cloned()).collect();
+        let id_map_data = serde_json::to_vec(&id_map)?;
+        let id_map_path = format!("indexes/{}/shards/{}/id_map.json", index_name, shard_id);
+        s3.put_object(&id_map_path, id_map_data.into()).await?;
+
+        // Persist metadata JSON (without vectors since they're in the Faiss index)
+        let metadata_path = format!("indexes/{}/shards/{}/metadata.json", index_name, shard_id);
+        let metadata_data = serde_json::to_vec(&shard_metadata)?;
+        s3.put_object(&metadata_path, metadata_data.into()).await?;
+
+        let shard_info = ShardInfo {
+            shard_id: shard_id.clone(),
+            index_path: index_object_path,
+            metadata_path,
+            vector_count: shard_ids_slice.len(),
+            metric: config.metric.clone(),
+            created_at: Utc::now().format("%Y%m%dT%H%M%S").to_string(),
+        };
+        
+        // Update manifest for each shard
         update_index_manifest(s3, index_name, shard_info, &config).await?;
         
-        tracing::info!("Created shard {}/{} with {} vectors", 
+        tracing::info!("Created Faiss IVF-PQ shard {}/{} with {} vectors", 
                        shard_index + 1, num_shards, end_idx - start_idx);
     }
 
@@ -98,7 +150,7 @@ async fn process_index_slices(s3: &S3Client, index_name: &str, slice_paths: Vec<
         s3.delete_object(&slice_path).await?;
     }
 
-    tracing::info!("Successfully processed {} vectors for index {} in {} shards", 
+    tracing::info!("Successfully processed {} vectors for index {} in {} Faiss IVF-PQ shards", 
                    all_vectors.len(), index_name, num_shards);
     Ok(())
 }
@@ -119,66 +171,36 @@ async fn get_or_create_index_config(s3: &S3Client, index_name: &str, dimension: 
     match s3.get_object(&config_key).await {
         Ok(data) => {
             let config: IndexConfig = serde_json::from_slice(&data).context("Failed to parse index config")?;
-            tracing::info!("Loaded existing index config: {}D, {}", config.dim, config.metric);
+            tracing::info!("Loaded existing index config: {}D, {}, nlist={}, PQ={}x{}", 
+                         config.dim, config.metric, config.nlist, config.m, config.nbits);
             Ok(config)
         }
         Err(e) => {
-            tracing::warn!("Failed to load index config: {}, creating default", e);
-            // Create default config
+            tracing::warn!("Failed to load index config: {}, creating default with optimal Faiss parameters", e);
+            
+            // Calculate optimal parameters for Faiss IVF-PQ based on estimated dataset size
+            let estimated_total_vectors = dimension * 10000; // Rough estimate, will be adjusted
+            let optimal_nlist = faiss_utils::calculate_optimal_nlist(estimated_total_vectors);
+            
+            // Create default config with reasonable IVF-PQ parameters
             let config = IndexConfig {
                 name: index_name.to_string(),
                 dim: dimension as u32,
                 metric: "cosine".to_string(),
-                nlist: 16,
-                m: 4,
-                nbits: 8,
+                nlist: optimal_nlist,
+                m: 8,  // 8 subspaces for PQ
+                nbits: 8,  // 8 bits per subspace
+                default_nprobe: Some(faiss_utils::calculate_optimal_nprobe(optimal_nlist)),
             };
             
             let config_data = serde_json::to_vec(&config)?;
             s3.put_object(&config_key, config_data.into()).await?;
-            tracing::info!("Created new index config: {}D, {}", config.dim, config.metric);
+            tracing::info!("Created new Faiss IVF-PQ index config: {}D, {}, nlist={}, PQ={}x{}, default_nprobe={}", 
+                         config.dim, config.metric, config.nlist, config.m, config.nbits, 
+                         config.default_nprobe.unwrap_or(0));
             Ok(config)
         }
     }
-}
-
-async fn create_shard(
-    s3: &S3Client,
-    index_name: &str,
-    shard_id: &str,
-    vectors: &[Vec<f32>],
-    vector_ids: &[String],
-    metadata: &HashMap<String, Value>,
-    config: &IndexConfig,
-) -> Result<ShardInfo> {
-    let timestamp = Utc::now().format("%Y%m%dT%H%M%S");
-    
-    // Store shard metadata (including vectors for simple brute force search)
-    let shard_metadata = ShardMetadata {
-        ids: vector_ids.to_vec(),
-        vectors: vectors.to_vec(),
-        metadata: metadata.clone(),
-    };
-    let metadata_path = format!("indexes/{}/shards/{}/metadata.json", index_name, shard_id);
-    let metadata_data = serde_json::to_vec(&shard_metadata)?;
-    s3.put_object(&metadata_path, metadata_data.into()).await?;
-
-    // For now, we don't create a separate index file - everything is in metadata
-    let index_path = format!("indexes/{}/shards/{}/index.json", index_name, shard_id);
-    let index_data = serde_json::json!({
-        "type": "simple_brute_force",
-        "created_at": timestamp.to_string()
-    });
-    s3.put_object(&index_path, serde_json::to_vec(&index_data)?.into()).await?;
-
-    Ok(ShardInfo {
-        shard_id: shard_id.to_string(),
-        index_path,
-        metadata_path,
-        vector_count: vector_ids.len(),
-        metric: config.metric.clone(),
-        created_at: timestamp.to_string(),
-    })
 }
 
 async fn update_index_manifest(s3: &S3Client, index_name: &str, new_shard: ShardInfo, config: &IndexConfig) -> Result<()> {
@@ -190,6 +212,7 @@ async fn update_index_manifest(s3: &S3Client, index_name: &str, new_shard: Shard
             index_name: index_name.to_string(),
             dim: config.dim,
             metric: config.metric.clone(),
+            default_nprobe: config.default_nprobe,
             shards: Vec::new(),
             total_vectors: 0,
         },
@@ -212,6 +235,7 @@ struct IndexConfig {
     nlist: u32,
     m: u32,
     nbits: u32,
+    default_nprobe: Option<u32>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -219,6 +243,7 @@ struct IndexManifest {
     index_name: String,
     dim: u32,
     metric: String,
+    default_nprobe: Option<u32>,
     shards: Vec<ShardInfo>,
     total_vectors: usize,
 }
@@ -231,11 +256,4 @@ struct ShardInfo {
     vector_count: usize,
     metric: String,
     created_at: String,
-}
-
-#[derive(serde::Deserialize, serde::Serialize)]
-struct ShardMetadata {
-    ids: Vec<String>,
-    vectors: Vec<Vec<f32>>, // Store vectors for brute force search
-    metadata: HashMap<String, Value>,
 }

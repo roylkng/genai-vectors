@@ -1,4 +1,5 @@
 mod api;
+mod faiss_utils;
 mod ingest;
 mod indexer;
 mod query;
