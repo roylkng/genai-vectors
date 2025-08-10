@@ -120,6 +120,13 @@ async fn search_shard(
     std::fs::write(&local_index_path, &index_bytes)
         .context("Failed to write temp index file")?;
     
+    // Also try to download the config file
+    let config_path = format!("/tmp/{}.config.json", shard.shard_id);
+    let index_config_key = shard.index_path.replace("index.faiss", "index.config.json");
+    if let Ok(config_bytes) = s3.get_object(&index_config_key).await {
+        std::fs::write(&config_path, &config_bytes).ok();
+    }
+    
     let mut index = FaissIndex::load_from_file(&local_index_path)
         .context("Failed to load Faiss index")?;
 
@@ -176,8 +183,9 @@ async fn search_shard(
         }
     }
 
-    // Clean up temp file
+    // Clean up temp files
     let _ = std::fs::remove_file(&local_index_path);
+    let _ = std::fs::remove_file(&config_path);
 
     Ok(results)
 }
