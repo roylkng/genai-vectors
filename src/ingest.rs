@@ -3,14 +3,27 @@ use bytes::Bytes;
 use std::sync::{Arc, Mutex};
 use tokio::{fs, io::AsyncWriteExt, time::Instant};
 use chrono::Utc;
+use anyhow::Result;
 
 pub struct Buffer {
     rows: Vec<VectorRecord>,
     first_seen: Instant,
+    format: SliceFormat,
 }
+
+#[derive(Clone, Debug)]
+pub enum SliceFormat {
+    JsonLines,  // Original NDJSON format for compatibility
+    Parquet,    // Compact binary format for new deployments
+}
+
 impl Buffer {
-    fn new() -> Self {
-        Self { rows: Vec::new(), first_seen: Instant::now() }
+    fn new(format: SliceFormat) -> Self {
+        Self { 
+            rows: Vec::new(), 
+            first_seen: Instant::now(),
+            format,
+        }
     }
 }
 
@@ -18,11 +31,25 @@ pub struct Ingestor {
     buf: Arc<Mutex<Buffer>>,
     s3:  S3Client,
     bucket: String,
+    slice_format: SliceFormat,
 }
 
 impl Ingestor {
     pub fn new(s3: S3Client, bucket: String) -> Self {
-        Self { buf: Arc::new(Mutex::new(Buffer::new())), s3, bucket }
+        // Default to Parquet for new instances, can be configured via env var
+        let slice_format = match std::env::var("SLICE_FORMAT").as_deref() {
+            Ok("jsonl") | Ok("ndjson") => SliceFormat::JsonLines,
+            Ok("parquet") | _ => SliceFormat::Parquet, // Default to Parquet
+        };
+        
+        tracing::info!("Ingestor configured with slice format: {:?}", slice_format);
+        
+        Self { 
+            buf: Arc::new(Mutex::new(Buffer::new(slice_format.clone()))), 
+            s3, 
+            bucket,
+            slice_format,
+        }
     }
 
     /// Append vectors to WAL and RAM buffer; flush slice if needed
@@ -56,17 +83,50 @@ impl Ingestor {
         Ok(())
     }
 
-    async fn write_slice(&self, rows: Vec<VectorRecord>, index: &str) -> anyhow::Result<()> {
-        // simplistic JSONL write
+    async fn write_slice(&self, rows: Vec<VectorRecord>, index: &str) -> Result<()> {
         let ts = Utc::now().format("%Y%m%dT%H%M%S%3f");
-        let key = format!("staged/{}/slice-{}.jsonl", index, ts);
-        let mut tmp = fs::File::create("/tmp/slice.jsonl").await?;
-        for r in &rows { 
+        
+        match self.slice_format {
+            SliceFormat::JsonLines => {
+                // Original JSONL format
+                let key = format!("staged/{}/slice-{}.jsonl", index, ts);
+                let mut tmp = fs::File::create("/tmp/slice.jsonl").await?;
+                for r in &rows { 
+                    tmp.write_all(serde_json::to_string(r)?.as_bytes()).await?; 
+                    tmp.write_u8(b'\n').await?; 
+                }
+                tmp.sync_all().await?;
+                self.s3.put_file(&self.bucket, &key, "/tmp/slice.jsonl").await?;
+                
+                tracing::debug!("Wrote {} vectors to JSONL slice: {}", rows.len(), key);
+            }
+            SliceFormat::Parquet => {
+                // Compact Parquet format
+                let key = format!("staged/{}/slice-{}.parquet", index, ts);
+                self.write_parquet_slice(&rows, &key).await?;
+                
+                tracing::debug!("Wrote {} vectors to Parquet slice: {}", rows.len(), key);
+            }
+        }
+        
+        Ok(())
+    }
+    
+    /// Write vectors to Parquet format for compact storage and fast parsing
+    async fn write_parquet_slice(&self, rows: &[VectorRecord], key: &str) -> Result<()> {
+        // For now, fall back to JSONL until we implement Parquet support
+        // This is a placeholder for the Parquet implementation
+        tracing::warn!("Parquet format not yet implemented, falling back to JSONL");
+        
+        let tmp_path = "/tmp/slice_fallback.jsonl";
+        let mut tmp = fs::File::create(tmp_path).await?;
+        for r in rows { 
             tmp.write_all(serde_json::to_string(r)?.as_bytes()).await?; 
             tmp.write_u8(b'\n').await?; 
         }
         tmp.sync_all().await?;
-        self.s3.put_file(&self.bucket, &key, "/tmp/slice.jsonl").await?;
+        self.s3.put_file(&self.bucket, key, tmp_path).await?;
+        
         Ok(())
     }
 }

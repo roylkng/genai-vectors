@@ -52,15 +52,25 @@ impl S3Client {
     }
 
     pub async fn put_object(&self, key: &str, data: Bytes) -> Result<()> {
-        self.client
+        tracing::info!("🔍 MinIO put_object attempt - bucket: {}, key: {}, data_size: {}", &self.bucket, key, data.len());
+        
+        match self.client
             .put_object()
             .bucket(&self.bucket)
             .key(key)
             .body(ByteStream::from(data))
             .send()
             .await
-            .context("Failed to put object")?;
-        Ok(())
+        {
+            Ok(_) => {
+                tracing::info!("✅ MinIO put_object success - key: {}", key);
+                Ok(())
+            },
+            Err(e) => {
+                tracing::error!("❌ MinIO put_object failed - key: {}, detailed_error: {:?}", key, e);
+                Err(anyhow::anyhow!("Failed to put object {}: {:?}", key, e))
+            }
+        }
     }
 
     pub async fn get_object(&self, key: &str) -> Result<Bytes> {

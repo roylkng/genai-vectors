@@ -12,6 +12,8 @@ pub struct CreateIndex {
     pub nlist: u32,
     pub m: u32,
     pub nbits: u32,
+    /// Optional default nprobe value used by the query service; if not provided the service will derive one.
+    pub default_nprobe: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize)]

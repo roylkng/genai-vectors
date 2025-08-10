@@ -3,8 +3,11 @@
 //! A production-grade vector database built with Rust for scalable similarity search.
 
 pub mod api;
+pub mod faiss_utils;
 pub mod indexer;
 pub mod ingest;
+pub mod metadata_filter;
+pub mod metrics;
 pub mod minio;
 pub mod model;
 pub mod query;

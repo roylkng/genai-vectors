@@ -1,37 +1,41 @@
-apiVersion: skaffold/v4beta8
+apiVersion: skaffold/v4beta11
 kind: Config
-metadata:
-  name: vector-store-poc
-build:
-  artifacts:
-  - image: vector-store-api
-    context: .
-    docker:
-      dockerfile: Dockerfile.api
-  - image: vector-store-indexer
-    context: .
-    docker:
-      dockerfile: Dockerfile.indexer
-deploy:
-  helm:
-    releases:
-    - name: vector-store
-      chartPath: charts/vector-store
-      setValueTemplates:
-        api.image: vector-store-api
-        indexer.image: vector-store-indexer
-    - name: minio
-      remoteChart: bitnami/minio
-      valuesFiles:
-      - k8s/minio.values.yaml
-portForward:
-- resourceType: Service
-  resourceName: minio
-  namespace: default
-  port: 9000
-  localPort: 9000
-- resourceType: Service
-  resourceName: vector-store-api
-  namespace: default
-  port: 8080
-  localPort: 8080
+profiles:
+  - name: minio
+    deploy:
+      helm:
+        releases:
+          - name: minio
+            namespace: genai-vectors
+            createNamespace: true
+            remoteChart: bitnami/minio
+            valuesFiles:
+              - k8s/minio.values.yaml
+
+  - name: vector-store
+    build:
+      tagPolicy:
+        envTemplate:
+          template: "v1"
+      artifacts:
+        - image: hv-local/vector-store-api
+          docker:
+            dockerfile: Dockerfile.api
+        - image: hv-local/vector-store-indexer
+          docker:
+            dockerfile: Dockerfile.indexer
+      local:
+        push: false
+        concurrency: 1
+    deploy:
+      helm:
+        releases:
+          - name: vector-store
+            chartPath: charts/vector-store
+            namespace: genai-vectors
+            createNamespace: true
+            setValues:
+              api.image: hv-local/vector-store-api
+              api.tag: v1
+              indexer.image: hv-local/vector-store-indexer
+              indexer.tag: v1
