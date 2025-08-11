@@ -1,9 +1,17 @@
-use crate::{minio::S3Client, model::*};
+use crate::{minio::S3Client, model::*, indexer};
+use anyhow::Result;
+use arrow::array::{ListArray, RecordBatch, StringArray, TimestampNanosecondArray};
+use arrow::datatypes::{DataType, Field, Float32Type, Schema, TimeUnit};
 use bytes::Bytes;
+use chrono::Utc;
+use parquet::arrow::ArrowWriter;
+use parquet::file::properties::WriterProperties;
+use std::fs::File;
 use std::sync::{Arc, Mutex};
 use tokio::{fs, io::AsyncWriteExt, time::Instant};
-use chrono::Utc;
-use anyhow::Result;
+
+pub const SLICE_ROW_LIMIT: usize = 5000;
+pub const SLICE_AGE_LIMIT_S: u64 = 30;
 
 pub struct Buffer {
     rows: Vec<VectorRecord>,
@@ -13,14 +21,14 @@ pub struct Buffer {
 
 #[derive(Clone, Debug)]
 pub enum SliceFormat {
-    JsonLines,  // Original NDJSON format for compatibility
-    Parquet,    // Compact binary format for new deployments
+    JsonLines,
+    Parquet,
 }
 
 impl Buffer {
     fn new(format: SliceFormat) -> Self {
-        Self { 
-            rows: Vec::new(), 
+        Self {
+            rows: Vec::new(),
             first_seen: Instant::now(),
             format,
         }
@@ -29,54 +37,52 @@ impl Buffer {
 
 pub struct Ingestor {
     buf: Arc<Mutex<Buffer>>,
-    s3:  S3Client,
+    s3: S3Client,
     bucket: String,
     slice_format: SliceFormat,
 }
 
 impl Ingestor {
     pub fn new(s3: S3Client, bucket: String) -> Self {
-        // Default to Parquet for new instances, can be configured via env var
         let slice_format = match std::env::var("SLICE_FORMAT").as_deref() {
             Ok("jsonl") | Ok("ndjson") => SliceFormat::JsonLines,
-            Ok("parquet") | _ => SliceFormat::Parquet, // Default to Parquet
+            Ok("parquet") | _ => SliceFormat::Parquet,
         };
-        
         tracing::info!("Ingestor configured with slice format: {:?}", slice_format);
-        
-        Self { 
-            buf: Arc::new(Mutex::new(Buffer::new(slice_format.clone()))), 
-            s3, 
+        Self {
+            buf: Arc::new(Mutex::new(Buffer::new(slice_format.clone()))),
+            s3,
             bucket,
             slice_format,
         }
     }
 
-    /// Append vectors to WAL and RAM buffer; flush slice if needed
     pub async fn append(&self, vecs: Vec<VectorRecord>, index: &str) -> anyhow::Result<()> {
-        // 1) append to WAL (one NDJSON line each)
         let mut wal_bytes = Vec::new();
         for rec in &vecs {
             wal_bytes.extend(serde_json::to_vec(rec)?);
             wal_bytes.push(b'\n');
         }
-        self.s3.append_object(&self.bucket, "wal/current.ndjson", Bytes::from(wal_bytes)).await?;
+        self.s3
+            .append_object(&self.bucket, "wal/current.ndjson", Bytes::from(wal_bytes))
+            .await?;
 
-        // 2) RAM buffer
         let slice_rows = {
             let mut guard = self.buf.lock().unwrap();
-            if guard.rows.is_empty() { guard.first_seen = Instant::now(); }
+            if guard.rows.is_empty() {
+                guard.first_seen = Instant::now();
+            }
             guard.rows.extend(vecs);
 
-            if guard.rows.len() >= SLICE_ROW_LIMIT ||
-               guard.first_seen.elapsed().as_secs() >= SLICE_AGE_LIMIT_S {
-                // dump slice to staging parquet
+            if guard.rows.len() >= SLICE_ROW_LIMIT
+                || guard.first_seen.elapsed().as_secs() >= SLICE_AGE_LIMIT_S
+            {
                 Some(std::mem::take(&mut guard.rows))
             } else {
                 None
             }
-        }; // guard is dropped here
-        
+        };
+
         if let Some(rows) = slice_rows {
             self.write_slice(rows, index).await?;
         }
@@ -86,47 +92,84 @@ impl Ingestor {
     async fn write_slice(&self, rows: Vec<VectorRecord>, index: &str) -> Result<()> {
         let ts = Utc::now().format("%Y%m%dT%H%M%S%3f");
         
-        match self.slice_format {
+        let (key, local_path) = match self.slice_format {
             SliceFormat::JsonLines => {
-                // Original JSONL format
                 let key = format!("staged/{}/slice-{}.jsonl", index, ts);
-                let mut tmp = fs::File::create("/tmp/slice.jsonl").await?;
-                for r in &rows { 
-                    tmp.write_all(serde_json::to_string(r)?.as_bytes()).await?; 
-                    tmp.write_u8(b'\n').await?; 
+                let local_path = "/tmp/slice.jsonl";
+                let mut tmp = fs::File::create(local_path).await?;
+                for r in &rows {
+                    tmp.write_all(serde_json::to_string(r)?.as_bytes()).await?;
+                    tmp.write_u8(b'\n').await?;
                 }
                 tmp.sync_all().await?;
-                self.s3.put_file(&self.bucket, &key, "/tmp/slice.jsonl").await?;
-                
-                tracing::debug!("Wrote {} vectors to JSONL slice: {}", rows.len(), key);
+                (key, local_path.to_string())
             }
             SliceFormat::Parquet => {
-                // Compact Parquet format
                 let key = format!("staged/{}/slice-{}.parquet", index, ts);
-                self.write_parquet_slice(&rows, &key).await?;
-                
-                tracing::debug!("Wrote {} vectors to Parquet slice: {}", rows.len(), key);
+                let local_path = self.write_parquet_slice(&rows).await?;
+                (key, local_path)
             }
-        }
+        };
+
+        self.s3.put_file(&self.bucket, &key, &local_path).await?;
+        tokio::fs::remove_file(&local_path).await?;
+
+        tracing::debug!("Wrote {} vectors to slice: {}", rows.len(), key);
+
+        let s3_clone = self.s3.clone();
+        tokio::spawn(async move {
+            tracing::info!("Triggering indexing for slice: {}", key);
+            if let Err(e) = indexer::trigger_indexing_for_slice(s3_clone, key).await {
+                tracing::error!("Failed to trigger indexing for slice: {}", e);
+            }
+        });
         
         Ok(())
     }
-    
-    /// Write vectors to Parquet format for compact storage and fast parsing
-    async fn write_parquet_slice(&self, rows: &[VectorRecord], key: &str) -> Result<()> {
-        // For now, fall back to JSONL until we implement Parquet support
-        // This is a placeholder for the Parquet implementation
-        tracing::warn!("Parquet format not yet implemented, falling back to JSONL");
+
+    async fn write_parquet_slice(&self, rows: &[VectorRecord]) -> Result<String> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::List(Arc::new(Field::new("item", DataType::Float32, true))),
+                false,
+            ),
+            Field::new("meta", DataType::Utf8, true),
+            Field::new(
+                "created_at",
+                DataType::Timestamp(TimeUnit::Nanosecond, None),
+                false,
+            ),
+        ]));
+
+        let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
+        let embeddings_iter = rows.iter().map(|r| Some(r.embedding.clone()));
+        let metas: Vec<String> = rows.iter().map(|r| r.meta.to_string()).collect();
+        let created_ats: Vec<i64> = rows
+            .iter()
+            .map(|r| r.created_at.timestamp_nanos_opt().unwrap_or(0))
+            .collect();
+
+        let id_array = Arc::new(StringArray::from(ids));
+        let embedding_array = Arc::new(ListArray::from_iter_primitive::<Float32Type, _, _>(
+            embeddings_iter,
+        ));
+        let meta_array = Arc::new(StringArray::from(metas));
+        let created_at_array = Arc::new(TimestampNanosecondArray::from(created_ats));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![id_array, embedding_array, meta_array, created_at_array],
+        )?;
+
+        let local_path = format!("/tmp/slice-{}.parquet", Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let file = File::create(&local_path)?;
+        let props = WriterProperties::builder().build();
+        let mut writer = ArrowWriter::try_new(file, schema, Some(props))?;
+        writer.write(&batch)?;
+        writer.close()?;
         
-        let tmp_path = "/tmp/slice_fallback.jsonl";
-        let mut tmp = fs::File::create(tmp_path).await?;
-        for r in rows { 
-            tmp.write_all(serde_json::to_string(r)?.as_bytes()).await?; 
-            tmp.write_u8(b'\n').await?; 
-        }
-        tmp.sync_all().await?;
-        self.s3.put_file(&self.bucket, key, tmp_path).await?;
-        
-        Ok(())
+        Ok(local_path)
     }
 }

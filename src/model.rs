@@ -4,7 +4,14 @@ use chrono::{DateTime, Utc};
 pub const SLICE_ROW_LIMIT: usize = 1_000;  // flush after 1k rows
 pub const SLICE_AGE_LIMIT_S: u64 = 30;     // or 30-second age
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct FilterableKey {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub key_type: String,
+}
+
+#[derive(Serialize, Deserialize, Default)]
 pub struct CreateIndex {
     pub name: String,
     pub dim: u32,
@@ -14,6 +21,12 @@ pub struct CreateIndex {
     pub nbits: u32,
     /// Optional default nprobe value used by the query service; if not provided the service will derive one.
     pub default_nprobe: Option<u32>,
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    #[serde(default)]
+    pub hnsw_threshold: Option<usize>,
+    #[serde(default)]
+    pub filterable_keys: Vec<FilterableKey>,
 }
 
 #[derive(Serialize, Deserialize)]
