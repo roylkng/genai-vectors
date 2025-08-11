@@ -2,6 +2,7 @@ mod api;
 mod faiss_utils;
 mod ingest;
 mod indexer;
+mod metadata_filter;
 mod metrics;
 mod query;
 mod model;
