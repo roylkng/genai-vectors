@@ -35,8 +35,10 @@ else
 fi
 
 echo "📦 Installing Python test dependencies..."
-pip install boto3 pytest pytest-asyncio numpy requests --no-deps || {
-    echo "⚠️  Some packages may have failed, continuing..."
+pip install boto3 requests pytest pytest-asyncio || {
+    echo "⚠️  Failed to install some Python packages"
+    echo "   You may need to install them manually:"
+    echo "   pip install boto3 requests pytest pytest-asyncio"
 }
 
 # Build Rust project
@@ -64,10 +66,12 @@ mkdir -p data/logs
 
 echo "✅ Development environment setup complete!"
 echo ""
-echo "Next steps:"
-echo "1. Edit .env with your AWS credentials, OR"
-echo "2. Edit config/local.toml with your configuration, OR" 
-echo "3. Set environment variables: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY"
-echo "4. Run tests: source .venv/bin/activate && python -m pytest tests/ -v"
-echo "5. Start development server: cargo run"
-echo "6. Or use Docker: docker-compose up"
+echo "🎯 Next steps:"
+echo "1. Set up MinIO: kubectl port-forward -n genai-vectors service/minio 9000:9000"
+echo "2. Set environment variables:"
+echo "   export AWS_ACCESS_KEY_ID=minioadmin"
+echo "   export AWS_SECRET_ACCESS_KEY=minioadmin"
+echo "   export AWS_ENDPOINT_URL=http://localhost:9000"
+echo "3. Start API server: cargo run --release api"
+echo "4. Run tests: make test-compatibility"
+echo "5. For real embeddings test: Start LM Studio and run make test-real"

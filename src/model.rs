@@ -27,6 +27,8 @@ pub struct CreateIndex {
     pub hnsw_threshold: Option<usize>,
     #[serde(default)]
     pub filterable_keys: Vec<FilterableKey>,
+    #[serde(default)]
+    pub non_filterable_keys: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize)]

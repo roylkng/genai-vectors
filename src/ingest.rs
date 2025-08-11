@@ -45,8 +45,8 @@ pub struct Ingestor {
 impl Ingestor {
     pub fn new(s3: S3Client, bucket: String) -> Self {
         let slice_format = match std::env::var("SLICE_FORMAT").as_deref() {
-            Ok("jsonl") | Ok("ndjson") => SliceFormat::JsonLines,
-            Ok("parquet") | _ => SliceFormat::Parquet,
+            Ok("parquet") => SliceFormat::Parquet,
+            Ok("jsonl") | Ok("ndjson") | _ => SliceFormat::JsonLines, // Default to JSONL
         };
         tracing::info!("Ingestor configured with slice format: {:?}", slice_format);
         Self {
@@ -116,11 +116,18 @@ impl Ingestor {
 
         tracing::debug!("Wrote {} vectors to slice: {}", rows.len(), key);
 
+        // Enhanced callback indexing - trigger immediately after slice upload
         let s3_clone = self.s3.clone();
+        let key_clone = key.clone();
         tokio::spawn(async move {
-            tracing::info!("Triggering indexing for slice: {}", key);
-            if let Err(e) = indexer::trigger_indexing_for_slice(s3_clone, key).await {
+            tracing::info!("Triggering immediate indexing for slice: {}", key_clone);
+            // Add a small delay to ensure object is fully written
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            
+            if let Err(e) = indexer::trigger_indexing_for_slice(s3_clone, key_clone).await {
                 tracing::error!("Failed to trigger indexing for slice: {}", e);
+            } else {
+                tracing::info!("Successfully triggered indexing callback");
             }
         });
         
@@ -144,7 +151,7 @@ impl Ingestor {
         ]));
 
         let ids: Vec<String> = rows.iter().map(|r| r.id.clone()).collect();
-        let embeddings_iter = rows.iter().map(|r| Some(r.embedding.clone()));
+        let embeddings_iter = rows.iter().map(|r| Some(r.embedding.iter().map(|&f| Some(f)).collect::<Vec<_>>()));
         let metas: Vec<String> = rows.iter().map(|r| r.meta.to_string()).collect();
         let created_ats: Vec<i64> = rows
             .iter()

@@ -30,25 +30,45 @@ A production-grade vector database built with Rust, featuring **100% AWS S3 Vect
 | delete-vectors | ✅ | Delete vectors |
 | query-vectors | ✅ | Similarity search |
 
-## 🚀 Quick Start
+## � Project Structure
 
-### 1. Prerequisites
-- Rust 1.75+
-- MinIO or AWS S3 access
-- Python 3.8+ (for testing)
-
-### 2. Clone and Build
-```bash
-git clone <repository-url>
-cd genai-vectors
-cargo build --release
+```
+genai-vectors/
+├── src/                          # Rust source code
+│   ├── api.rs                   # AWS S3 Vectors API implementation
+│   ├── faiss_utils.rs          # FAISS integration utilities
+│   ├── ingest.rs               # Vector ingestion pipeline
+│   ├── query.rs                # Vector similarity search
+│   ├── minio.rs                # S3/MinIO client
+│   └── ...
+├── tests/                       # Comprehensive test suite
+│   ├── integration/            # Integration tests
+│   │   ├── test_real_embeddings_s3.py    # Real LM Studio integration
+│   │   ├── test_s3_compatibility.py      # S3 API compatibility
+│   │   └── run_real_embeddings_test.sh   # Test automation
+│   ├── test_small_scale.py    # Unit tests
+│   └── test_large_scale.py    # Performance tests
+├── scripts/                    # Utility scripts
+├── config/                     # Configuration files
+├── charts/                     # Helm charts for Kubernetes
+├── docs/                      # Documentation
+└── Makefile                   # Build and deployment commands
 ```
 
-### 3. Start MinIO (Local Development)
+## 🧪 Testing
+
+### Run Full Integration Test (with LM Studio)
 ```bash
-# In separate terminal
-kubectl port-forward svc/minio 9000:9000 -n genai-vectors
+cd tests/integration
+./run_real_embeddings_test.sh
 ```
+
+### Run S3 API Compatibility Test
+```bash
+python tests/integration/test_s3_compatibility.py
+```
+
+Expected result: **13/13 commands passed (100.0%)**
 
 ### 4. Run the Service
 ```bash

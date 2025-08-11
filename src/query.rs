@@ -1,5 +1,7 @@
 use crate::{minio::S3Client, model::*};
+use crate::metadata_filter::MetadataFilter;
 use crate::metrics::get_metrics_collector;
+use faiss::{Index, Idx};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -74,8 +76,19 @@ async fn search_shard(
         .context("Failed to parse shard metadata")?;
     let metadata_load_time = metadata_start.elapsed();
 
-    let pre_filtered_ids: Option<Vec<String>> = if let Some(_filter_value) = &req.filter {
-        None
+    // Apply metadata pre-filtering if specified
+    let pre_filtered_ids: Option<Vec<String>> = if let Some(filter_value) = &req.filter {
+        match MetadataFilter::try_from(filter_value.clone()) {
+            Ok(filter) => {
+                let filtered = filter.pre_filter_ids(&metadata_map);
+                get_metrics_collector().track_metric("query.pre_filtered_candidates", filtered.len() as f64);
+                Some(filtered)
+            }
+            Err(e) => {
+                tracing::warn!("Invalid metadata filter: {}, proceeding without filter", e);
+                None
+            }
+        }
     } else {
         None
     };
@@ -109,7 +122,7 @@ async fn search_shard(
         &mut index,
         &req.embedding,
         search_k,
-        req.nprobe,
+        req.nprobe.map(|n| n as usize),
     )?;
 
     let mut results = Vec::new();

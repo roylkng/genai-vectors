@@ -230,7 +230,7 @@ async fn get_or_create_index_config(
                 nlist: feasible_nlist as u32,
                 m: optimal_m as u32,
                 nbits: optimal_nbits as u32,
-                algorithm: Some("ivfpq".to_string()),
+                algorithm: Some("hnsw_flat".to_string()), // Default to HNSW
                 hnsw_threshold: Some(100_000),
             };
             let config_data = serde_json::to_vec(&config)?;

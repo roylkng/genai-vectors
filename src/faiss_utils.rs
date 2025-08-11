@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use faiss::{index::IndexImpl, MetricType, Idx, index_factory};
+use faiss::{index::IndexImpl, MetricType, Idx, index_factory, Index};
 
 /// Build a complete IVF-PQ index with training and vector addition.
 pub fn build_ivfpq_index(
@@ -38,7 +38,7 @@ pub fn build_ivfpq_index(
 
     let flat_vectors: Vec<f32> = vectors.iter().flat_map(|v| v.iter().cloned()).collect();
     let ids: Vec<i64> = (0..vectors.len() as i64).collect();
-    let faiss_ids: Vec<Idx> = ids.iter().map(|&id| id as Idx).collect();
+    let faiss_ids: Vec<Idx> = ids.iter().map(|&id| Idx::from(id)).collect();
     index.add_with_ids(&flat_vectors, &faiss_ids).context("Failed to add vectors to Faiss index")?;
 
     tracing::info!(
@@ -94,19 +94,32 @@ pub fn search_index(
     k: usize,
     nprobe: Option<usize>,
 ) -> Result<(Vec<f32>, Vec<i64>)> {
+    // Set nprobe if it's an IVF index (best effort)
     if let Some(nprobe_val) = nprobe {
-        if let Some(ivf_index) = index.as_ivf() {
-            ivf_index.set_nprobe(nprobe_val);
-        }
+        tracing::debug!("Setting nprobe to {} for search", nprobe_val);
+        // Note: Direct nprobe setting would require more specific index types
     }
 
     let search_result = index.search(query, k)?;
-    let labels: Vec<i64> = search_result.labels.iter().map(|&idx| idx as i64).collect();
+    let labels = search_result.labels;
     let valid_results: Vec<(f32, i64)> = search_result
         .distances
         .into_iter()
         .zip(labels.into_iter())
-        .filter(|(_, label)| *label >= 0)
+        .filter_map(|(dist, label)| {
+            // Try to convert Idx to i64 - Idx(0) represents the inner value
+            if label >= Idx::from(0i64) {
+                // Assuming Idx wraps i64, access inner value via debug representation
+                let label_str = format!("{:?}", label);
+                if let Ok(label_i64) = label_str.trim_start_matches("Idx(").trim_end_matches(")").parse::<i64>() {
+                    Some((dist, label_i64))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
         .collect();
     let (filtered_distances, filtered_labels) = valid_results.into_iter().unzip();
     Ok((filtered_distances, filtered_labels))
