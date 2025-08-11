@@ -312,22 +312,68 @@ async fn s3_delete_vector_bucket(bucket: String, _state: AppState) -> impl IntoR
     (StatusCode::OK, Json(response))
 }
 
-async fn s3_list_indexes(bucket: String, _state: AppState) -> impl IntoResponse {
+async fn s3_list_indexes(bucket: String, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 list-indexes request for bucket: {}", bucket);
     
-    let response = json!({
-        "bucket": bucket,
-        "indexes": [
-            {
-                "name": "default",
-                "dimension": 1536,
-                "metric": "cosine",
-                "vector_count": 0
+    // List actual indexes by looking for config.json files in indexes/ directory
+    match state.s3.list_objects("indexes/").await {
+        Ok(objects) => {
+            let mut indexes = Vec::new();
+            
+            for object in objects {
+                if object.ends_with("/config.json") {
+                    // Extract index name from path like "indexes/my-index/config.json"
+                    if let Some(index_name) = extract_index_name_from_config_path(&object) {
+                        // Try to load the index config to get details
+                        match state.s3.get_object(&object).await {
+                            Ok(config_data) => {
+                                if let Ok(config_str) = String::from_utf8(config_data.to_vec()) {
+                                    if let Ok(config) = serde_json::from_str::<serde_json::Value>(&config_str) {
+                                        let index_info = json!({
+                                            "name": index_name,
+                                            "dimension": config.get("dim").and_then(|v| v.as_u64()).unwrap_or(1536),
+                                            "metric": config.get("metric").and_then(|v| v.as_str()).unwrap_or("cosine"),
+                                            "vector_count": 0 // TODO: Could calculate from manifest
+                                        });
+                                        indexes.push(index_info);
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                tracing::warn!("Failed to load config for index {}: {}", index_name, e);
+                            }
+                        }
+                    }
+                }
             }
-        ]
-    });
-    
-    (StatusCode::OK, Json(response))
+            
+            let response = json!({
+                "bucket": bucket,
+                "indexes": indexes
+            });
+            
+            (StatusCode::OK, Json(response))
+        },
+        Err(e) => {
+            tracing::error!("Failed to list indexes: {}", e);
+            let response = json!({
+                "bucket": bucket,
+                "indexes": [],
+                "error": format!("Failed to list indexes: {}", e)
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(response))
+        }
+    }
+}
+
+fn extract_index_name_from_config_path(path: &str) -> Option<String> {
+    // Extract index name from path like "indexes/my-index/config.json"
+    if let Some(stripped) = path.strip_prefix("indexes/") {
+        if let Some(end_pos) = stripped.find("/config.json") {
+            return Some(stripped[..end_pos].to_string());
+        }
+    }
+    None
 }
 
 async fn s3_get_index(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
@@ -370,39 +416,214 @@ async fn s3_delete_index(bucket: String, body: serde_json::Value, _state: AppSta
     (StatusCode::OK, Json(response))
 }
 
-async fn s3_list_vectors(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_list_vectors(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 list-vectors request for bucket: {}, body: {:?}", bucket, body);
     
-    let index_name = body.get("index")
+    let index_name = body.get("indexName")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
     
+    let max_results = body.get("maxResults")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(100) as usize;
+    
+    // Try to load the manifest to get vector information
+    let manifest_key = format!("indexes/{}/manifest.json", index_name);
+    
+    match state.s3.get_object(&manifest_key).await {
+        Ok(manifest_data) => {
+            if let Ok(manifest_str) = String::from_utf8(manifest_data.to_vec()) {
+                if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_str) {
+                    let total_vectors = manifest.get("total_vectors")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    
+                    let shards = manifest.get("shards")
+                        .and_then(|v| v.as_array());
+                    
+                    let empty_vec = vec![];
+                    let shards = shards.unwrap_or(&empty_vec);
+                    
+                    let mut vectors_info = Vec::new();
+                    let mut count = 0;
+                    
+                    // List vectors from shards (limiting to max_results)
+                    for shard in shards {
+                        if count >= max_results { break; }
+                        
+                        if let Some(shard_id) = shard.get("shard_id").and_then(|v| v.as_str()) {
+                            if let Some(vector_count) = shard.get("vector_count").and_then(|v| v.as_u64()) {
+                                let shard_info = json!({
+                                    "shard_id": shard_id,
+                                    "vector_count": vector_count,
+                                    "created_at": shard.get("created_at").and_then(|v| v.as_str()).unwrap_or("unknown")
+                                });
+                                vectors_info.push(shard_info);
+                                count += 1;
+                            }
+                        }
+                    }
+                    
+                    let response = json!({
+                        "bucket": bucket,
+                        "index": index_name,
+                        "vectors": vectors_info,
+                        "count": vectors_info.len(),
+                        "total_vectors": total_vectors
+                    });
+                    
+                    return (StatusCode::OK, Json(response));
+                }
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to load manifest for index {}: {}", index_name, e);
+        }
+    }
+    
+    // Fallback response if manifest not found
     let response = json!({
         "bucket": bucket,
         "index": index_name,
         "vectors": [],
-        "count": 0
+        "count": 0,
+        "total_vectors": 0
     });
     
     (StatusCode::OK, Json(response))
 }
 
-async fn s3_get_vectors(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_get_vectors(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 get-vectors request for bucket: {}, body: {:?}", bucket, body);
     
-    let index_name = body.get("index")
+    let index_name = body.get("indexName")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
     
-    let _vector_ids = body.get("ids")
+    let keys = body.get("keys")
         .and_then(|v| v.as_array())
-        .unwrap_or(&vec![]);
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .unwrap_or_default();
     
+    let return_data = body.get("returnData")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    
+    let return_metadata = body.get("returnMetadata")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    
+    if keys.is_empty() {
+        let response = json!({
+            "bucket": bucket,
+            "index": index_name,
+            "vectors": [],
+            "found": 0
+        });
+        return (StatusCode::OK, Json(response));
+    }
+    
+    // Try to load the manifest to get shard information
+    let manifest_key = format!("indexes/{}/manifest.json", index_name);
+    
+    match state.s3.get_object(&manifest_key).await {
+        Ok(manifest_data) => {
+            if let Ok(manifest_str) = String::from_utf8(manifest_data.to_vec()) {
+                if let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&manifest_str) {
+                    let shards = manifest.get("shards")
+                        .and_then(|v| v.as_array());
+                    
+                    let empty_vec2 = vec![];
+                    let shards = shards.unwrap_or(&empty_vec2);
+                    
+                    let mut found_vectors = Vec::new();
+                    
+                    // Search through shards for the requested keys
+                    for shard in shards {
+                        if let Some(shard_id) = shard.get("shard_id").and_then(|v| v.as_str()) {
+                            // Try to load the ID mapping for this shard
+                            let id_map_path = format!("indexes/{}/shards/{}/id_map.json", index_name, shard_id);
+                            
+                            if let Ok(id_map_data) = state.s3.get_object(&id_map_path).await {
+                                if let Ok(id_map_str) = String::from_utf8(id_map_data.to_vec()) {
+                                    if let Ok(id_map) = serde_json::from_str::<Vec<(i64, String)>>(&id_map_str) {
+                                        // Check if any requested keys are in this shard
+                                        for key in &keys {
+                                            if let Some((faiss_id, _)) = id_map.iter().find(|(_, string_id)| string_id == key) {
+                                                // Try to load metadata for this vector
+                                                if return_metadata {
+                                                    let metadata_path = format!("indexes/{}/shards/{}/metadata.json", index_name, shard_id);
+                                                    if let Ok(metadata_data) = state.s3.get_object(&metadata_path).await {
+                                                        if let Ok(metadata_str) = String::from_utf8(metadata_data.to_vec()) {
+                                                            if let Ok(metadata_map) = serde_json::from_str::<std::collections::HashMap<String, serde_json::Value>>(&metadata_str) {
+                                                                let mut vector_response = json!({
+                                                                    "key": key,
+                                                                    "faiss_id": faiss_id
+                                                                });
+                                                                
+                                                                if let Some(metadata) = metadata_map.get(*key) {
+                                                                    vector_response["metadata"] = metadata.clone();
+                                                                }
+                                                                
+                                                                if return_data {
+                                                                    // Note: Getting actual vector data would require loading the Faiss index
+                                                                    // This is complex and would require the actual Faiss implementation
+                                                                    vector_response["data"] = json!({
+                                                                        "float32": [] // Placeholder - would need Faiss index loading
+                                                                    });
+                                                                }
+                                                                
+                                                                found_vectors.push(vector_response);
+                                                            }
+                                                        }
+                                                    }
+                                                } else {
+                                                    // Just return key information
+                                                    let mut vector_response = json!({
+                                                        "key": key,
+                                                        "faiss_id": faiss_id
+                                                    });
+                                                    
+                                                    if return_data {
+                                                        vector_response["data"] = json!({
+                                                            "float32": [] // Placeholder
+                                                        });
+                                                    }
+                                                    
+                                                    found_vectors.push(vector_response);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    
+                    let response = json!({
+                        "bucket": bucket,
+                        "index": index_name,
+                        "vectors": found_vectors,
+                        "found": found_vectors.len(),
+                        "requested": keys.len()
+                    });
+                    
+                    return (StatusCode::OK, Json(response));
+                }
+            }
+        },
+        Err(e) => {
+            tracing::warn!("Failed to load manifest for index {}: {}", index_name, e);
+        }
+    }
+    
+    // Fallback response if manifest not found
     let response = json!({
         "bucket": bucket,
         "index": index_name,
         "vectors": [],
-        "found": 0
+        "found": 0,
+        "requested": keys.len()
     });
     
     (StatusCode::OK, Json(response))
@@ -488,16 +709,26 @@ async fn s3_query_vectors_direct(
     s3_query_vectors(bucket, body, state).await
 }
 
-async fn s3_list_vector_buckets(_state: AppState) -> impl IntoResponse {
-    // Return the configured bucket as available vector bucket
-    Json(serde_json::json!({
-        "VectorBuckets": [
-            {
-                "Name": "vectors",
-                "CreationDate": "2024-01-01T00:00:00Z"
-            }
-        ]
-    })).into_response()
+async fn s3_list_vector_buckets(state: AppState) -> impl IntoResponse {
+    // List actual buckets from MinIO
+    match state.s3.list_buckets().await {
+        Ok(buckets) => {
+            let vector_buckets: Vec<_> = buckets.into_iter().map(|bucket| {
+                json!({
+                    "Name": bucket,
+                    "CreationDate": "2024-01-01T00:00:00Z"
+                })
+            }).collect();
+            
+            Json(json!({
+                "VectorBuckets": vector_buckets
+            })).into_response()
+        },
+        Err(e) => {
+            tracing::error!("Failed to list buckets: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list buckets: {}", e)).into_response()
+        }
+    }
 }
 
 async fn s3_create_index(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
