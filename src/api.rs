@@ -1,9 +1,30 @@
 use axum::{Router, routing::{post, get}, extract::{State, Path, Query}, Json, serve, response::{IntoResponse, Response}, http::StatusCode};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct S3CreateIndexRequest {
+    pub vector_bucket_name: String,
+    pub index_name: String,
+    pub data_type: String,
+    pub dimension: u32,
+    pub distance_metric: String,
+    #[serde(default)]
+    pub metadata_configuration: Option<MetadataConfiguration>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct MetadataConfiguration {
+    #[serde(default)]
+    pub non_filterable_metadata_keys: Vec<String>,
+}
+
 use crate::{model::*, ingest::Ingestor, minio::S3Client};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use anyhow::Context;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -36,19 +57,6 @@ struct S3VectorBucketQuery {
     delete_vectors: Option<String>,
     #[serde(rename = "query-vectors")]
     query_vectors: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct S3CreateIndexRequest {
-    #[serde(rename = "indexName")]
-    index_name: String,
-    #[serde(rename = "vectorBucketName")]
-    vector_bucket_name: String,
-    #[serde(rename = "dataType")]
-    data_type: String,
-    dimension: u32,
-    #[serde(rename = "distanceMetric")]
-    distance_metric: String,
 }
 
 #[derive(Deserialize)]
@@ -506,6 +514,12 @@ async fn s3_create_index(bucket: String, body: serde_json::Value, state: AppStat
         Err(e) => return (StatusCode::BAD_REQUEST, format!("Invalid request: {}", e)).into_response(),
     };
     
+    // Extract non-filterable metadata keys from the request
+    let non_filterable_keys = req.metadata_configuration
+        .as_ref()
+        .map(|config| config.non_filterable_metadata_keys.clone())
+        .unwrap_or_default();
+    
     // Convert S3 format to our internal format
     let create_index_req = CreateIndex {
         name: req.index_name.clone(),
@@ -515,6 +529,7 @@ async fn s3_create_index(bucket: String, body: serde_json::Value, state: AppStat
         m: 8,      // Default value  
         nbits: 8,  // Default value
         default_nprobe: Some(8), // Default value
+        non_filterable_metadata_keys: non_filterable_keys,
     };
     
     // Use our existing create_index logic
@@ -542,6 +557,23 @@ async fn s3_put_vectors(_bucket: String, body: serde_json::Value, state: AppStat
     
     let vector_count = req.vectors.len();
     tracing::info!("Converting {} vectors to internal format", vector_count);
+    
+    // Load index configuration to validate metadata sizes
+    let index_config = match load_index_configuration(&state.s3, &req.index_name).await {
+        Ok(config) => config,
+        Err(e) => {
+            tracing::error!("Failed to load index configuration for '{}': {}", req.index_name, e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to load index configuration: {}", e)).into_response();
+        }
+    };
+    
+    // Validate metadata for each vector
+    for (i, vector) in req.vectors.iter().enumerate() {
+        if let Err(e) = validate_vector_metadata(&vector.metadata, &index_config) {
+            tracing::error!("Metadata validation failed for vector {}: {}", i, e);
+            return (StatusCode::BAD_REQUEST, format!("Metadata validation failed for vector {}: {}", i, e)).into_response();
+        }
+    }
     
     // Convert S3 vectors format to our internal format
     let vectors: Vec<VectorRecord> = req.vectors.into_iter().map(|v| VectorRecord {
@@ -685,4 +717,77 @@ pub async fn run() -> anyhow::Result<()> {
     tracing::info!("API listening on {addr}");
     serve(listener, app).await?;
     Ok(())
+}
+
+// Helper functions for metadata validation
+
+async fn load_index_configuration(s3: &S3Client, index_name: &str) -> anyhow::Result<IndexConfiguration> {
+    let config_key = format!("indexes/{}/config.json", index_name);
+    
+    let data = s3.get_object(&config_key).await
+        .context("Failed to load index configuration")?;
+    
+    let create_index: CreateIndex = serde_json::from_slice(&data)
+        .context("Failed to parse index configuration")?;
+    
+    Ok(IndexConfiguration {
+        non_filterable_metadata_keys: create_index.non_filterable_metadata_keys,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct IndexConfiguration {
+    non_filterable_metadata_keys: Vec<String>,
+}
+
+fn validate_vector_metadata(metadata: &serde_json::Value, config: &IndexConfiguration) -> anyhow::Result<()> {
+    if let serde_json::Value::Object(map) = metadata {
+        let mut filterable_size = 0;
+        let mut non_filterable_size = 0;
+        
+        for (key, value) in map {
+            let value_size = calculate_metadata_value_size(value);
+            
+            if config.non_filterable_metadata_keys.contains(key) {
+                non_filterable_size += key.len() + value_size;
+            } else {
+                filterable_size += key.len() + value_size;
+            }
+        }
+        
+        // Check size limits (2KB for filterable, 40KB for non-filterable)
+        const FILTERABLE_LIMIT: usize = 2 * 1024; // 2KB
+        const NON_FILTERABLE_LIMIT: usize = 40 * 1024; // 40KB
+        
+        if filterable_size > FILTERABLE_LIMIT {
+            return Err(anyhow::anyhow!(
+                "Filterable metadata size ({} bytes) exceeds limit of {} bytes", 
+                filterable_size, FILTERABLE_LIMIT
+            ));
+        }
+        
+        if non_filterable_size > NON_FILTERABLE_LIMIT {
+            return Err(anyhow::anyhow!(
+                "Non-filterable metadata size ({} bytes) exceeds limit of {} bytes", 
+                non_filterable_size, NON_FILTERABLE_LIMIT
+            ));
+        }
+    }
+    
+    Ok(())
+}
+
+fn calculate_metadata_value_size(value: &serde_json::Value) -> usize {
+    match value {
+        serde_json::Value::Null => 4, // "null"
+        serde_json::Value::Bool(_) => 5, // "false" (worst case)
+        serde_json::Value::Number(n) => n.to_string().len(),
+        serde_json::Value::String(s) => s.len() + 2, // Include quotes in size estimation
+        serde_json::Value::Array(arr) => {
+            2 + arr.iter().map(calculate_metadata_value_size).sum::<usize>() // [] + content
+        }
+        serde_json::Value::Object(obj) => {
+            2 + obj.iter().map(|(k, v)| k.len() + 3 + calculate_metadata_value_size(v)).sum::<usize>() // {} + "key": + content
+        }
+    }
 }

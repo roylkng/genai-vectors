@@ -1,6 +1,6 @@
 use crate::{minio::S3Client, model::*};
 use crate::faiss_utils::FaissIndex;
-// use crate::metadata_filter::MetadataFilter;  // TODO: Re-enable after fixing module path
+// use genai_vectors::metadata_filter::MetadataFilter;  // Temporarily disabled for compilation
 use crate::metrics::get_metrics_collector;
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -13,6 +13,20 @@ pub async fn search(s3: S3Client, req: QueryRequest) -> Result<Value> {
     // Track query parameters
     get_metrics_collector().track_metric("query.topk", req.topk as f64);
     get_metrics_collector().track_metric("query.vector_dimension", req.embedding.len() as f64);
+    
+    // Load index configuration to validate metadata filtering
+    let index_config = if req.filter.is_some() {
+        load_index_config(&s3, &req.index).await?
+    } else {
+        None
+    };
+    
+    // Validate metadata filter against configuration
+    if let Some(filter_value) = &req.filter {
+        if let Some(ref config) = index_config {
+            validate_metadata_filter(filter_value, &config.non_filterable_metadata_keys)?;
+        }
+    }
     
     // 1. Load index manifest to find active shards
     let manifest_key = format!("indexes/{}/manifest.json", req.index);
@@ -85,7 +99,7 @@ async fn search_shard(
 
     // Apply metadata pre-filtering if specified
     let pre_filtered_ids: Option<Vec<String>> = if let Some(_filter_value) = &req.filter {
-        // TODO: Re-enable metadata filtering after fixing module path
+        // TODO: Re-enable metadata filtering after fixing compilation
         // match MetadataFilter::try_from(filter_value.clone()) {
         //     Ok(filter) => {
         //         let filtered = filter.pre_filter_ids(&metadata_map);
@@ -97,7 +111,7 @@ async fn search_shard(
         //         None
         //     }
         // }
-        None  // Temporary: disable filtering
+        None  // Temporarily disable filtering for compilation
     } else {
         None
     };
@@ -231,4 +245,94 @@ struct ShardMetadata {
     ids: Vec<String>,
     vectors: Vec<Vec<f32>>, // Store vectors for brute force search (not used in Faiss version)
     metadata: HashMap<String, Value>,
+}
+
+// Helper struct for index configuration
+#[derive(serde::Deserialize, Clone)]
+struct IndexConfig {
+    name: String,
+    dim: u32,
+    metric: String,
+    nlist: u32,
+    m: u32,
+    nbits: u32,
+    #[serde(default)]
+    non_filterable_metadata_keys: Vec<String>,
+}
+
+async fn load_index_config(s3: &S3Client, index_name: &str) -> Result<Option<IndexConfig>> {
+    let config_key = format!("indexes/{}/config.json", index_name);
+    
+    match s3.get_object(&config_key).await {
+        Ok(data) => {
+            match serde_json::from_slice::<CreateIndex>(&data) {
+                Ok(create_index) => {
+                    // Convert CreateIndex to our IndexConfig
+                    Ok(Some(IndexConfig {
+                        name: create_index.name,
+                        dim: create_index.dim,
+                        metric: create_index.metric,
+                        nlist: create_index.nlist,
+                        m: create_index.m,
+                        nbits: create_index.nbits,
+                        non_filterable_metadata_keys: create_index.non_filterable_metadata_keys,
+                    }))
+                }
+                Err(_) => {
+                    // Try parsing as IndexConfig directly for backward compatibility
+                    match serde_json::from_slice::<IndexConfig>(&data) {
+                        Ok(config) => Ok(Some(config)),
+                        Err(e) => {
+                            tracing::warn!("Failed to parse index config: {}", e);
+                            Ok(None)
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => Ok(None),
+    }
+}
+
+fn validate_metadata_filter(filter: &serde_json::Value, non_filterable_keys: &[String]) -> Result<()> {
+    validate_filter_recursive(filter, non_filterable_keys)
+}
+
+fn validate_filter_recursive(filter: &serde_json::Value, non_filterable_keys: &[String]) -> Result<()> {
+    match filter {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                // Check for logical operators
+                if key == "and" || key == "or" {
+                    if let serde_json::Value::Array(conditions) = value {
+                        for condition in conditions {
+                            validate_filter_recursive(condition, non_filterable_keys)?;
+                        }
+                    }
+                } else if key == "field" {
+                    // This is a field reference in our filter format
+                    if let serde_json::Value::String(field_name) = value {
+                        if non_filterable_keys.contains(field_name) {
+                            return Err(anyhow::anyhow!(
+                                "Field '{}' is marked as non-filterable and cannot be used in metadata filters", 
+                                field_name
+                            ));
+                        }
+                    }
+                } else {
+                    // Direct field reference (MongoDB-style)
+                    if non_filterable_keys.contains(key) {
+                        return Err(anyhow::anyhow!(
+                            "Field '{}' is marked as non-filterable and cannot be used in metadata filters", 
+                            key
+                        ));
+                    }
+                    // Recursively validate nested conditions
+                    validate_filter_recursive(value, non_filterable_keys)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }

@@ -191,6 +191,19 @@ async fn get_or_create_index_config(s3: &S3Client, index_name: &str, dimension: 
         Err(e) => {
             tracing::warn!("Failed to load index config: {}, creating optimized config based on dataset characteristics", e);
             
+            // Try to load the CreateIndex config to get metadata configuration
+            let create_index_config_key = format!("indexes/{}/config.json", index_name);
+            let non_filterable_keys = match s3.get_object(&create_index_config_key).await {
+                Ok(data) => {
+                    if let Ok(create_index) = serde_json::from_slice::<crate::model::CreateIndex>(&data) {
+                        create_index.non_filterable_metadata_keys
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Err(_) => Vec::new(),
+            };
+            
             // Estimate total dataset size from previous manifests or current batch
             let estimated_total_vectors = estimate_total_dataset_size(s3, index_name, dimension * 100).await;
             
@@ -208,6 +221,7 @@ async fn get_or_create_index_config(s3: &S3Client, index_name: &str, dimension: 
                 nlist: feasible_nlist as u32,
                 m: optimal_m as u32,
                 nbits: optimal_nbits as u32,
+                non_filterable_metadata_keys: non_filterable_keys,
             };
             
             let config_data = serde_json::to_vec(&config)?;
@@ -397,6 +411,8 @@ struct IndexConfig {
     nlist: u32,
     m: u32,
     nbits: u32,
+    #[serde(default)]
+    non_filterable_metadata_keys: Vec<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
