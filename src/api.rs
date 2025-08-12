@@ -23,7 +23,7 @@ use crate::{model::*, ingest::Ingestor, minio::S3Client};
 use std::sync::Arc;
 use std::collections::HashMap;
 use tokio::net::TcpListener;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize};
 use anyhow::Context;
 use serde_json::json;
 use uuid::Uuid;
@@ -286,156 +286,437 @@ async fn s3_vectors_handler(
     }
 }
 
-async fn s3_create_vector_bucket(bucket: String, _state: AppState) -> impl IntoResponse {
-    // For our implementation, vector buckets are just logical constructs
-    // The actual storage uses MinIO buckets
-    Json(serde_json::json!({
-        "VectorBucket": bucket
-    })).into_response()
+async fn s3_create_vector_bucket(bucket: String, state: AppState) -> impl IntoResponse {
+    // Create an actual bucket in S3
+    match state.s3.client.create_bucket().bucket(&bucket).send().await {
+        Ok(_) => {
+            tracing::info!("Successfully created vector bucket: {}", bucket);
+            Json(serde_json::json!({
+                "BucketName": bucket,
+                "VectorBucket": bucket
+            })).into_response()
+        }
+        Err(e) => {
+            // Bucket might already exist, which is OK
+            if e.to_string().contains("BucketAlreadyExists") || e.to_string().contains("BucketAlreadyOwnedByYou") {
+                tracing::info!("Vector bucket already exists: {}", bucket);
+                Json(serde_json::json!({
+                    "BucketName": bucket,
+                    "VectorBucket": bucket
+                })).into_response()
+            } else {
+                tracing::error!("Failed to create vector bucket {}: {}", bucket, e);
+                let error_response = json!({
+                    "error": format!("Failed to create bucket: {}", e)
+                });
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
+            }
+        }
+    }
 }
 
-async fn s3_get_vector_bucket(bucket: String, _state: AppState) -> impl IntoResponse {
+async fn s3_get_vector_bucket(bucket: String, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 get-vector-bucket request for bucket: {}", bucket);
     
-    let response = json!({
-        "bucket": bucket,
-        "exists": true,
-        "created_at": "2024-01-01T00:00:00Z",
-        "vector_count": 0,
-        "indexes": []
-    });
-    
-    (StatusCode::OK, Json(response))
+    // Check if bucket exists by trying to head it
+    match state.s3.client.head_bucket().bucket(&bucket).send().await {
+        Ok(_) => {
+            // Bucket exists, get some metadata
+            let vector_count = match state.s3.list_objects("vectors/").await {
+                Ok(objects) => objects.len(),
+                Err(_) => 0,
+            };
+            
+            let indexes = match state.s3.list_objects("indexes/").await {
+                Ok(objects) => {
+                    objects.into_iter()
+                        .filter_map(|key| {
+                            if key.ends_with("/config.json") {
+                                let index_name = key.strip_prefix("indexes/")?.strip_suffix("/config.json")?;
+                                Some(index_name.to_string())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Err(_) => vec![],
+            };
+            
+            let response = json!({
+                "bucket": bucket,
+                "exists": true,
+                "created_at": "2024-01-01T00:00:00Z",
+                "vector_count": vector_count,
+                "indexes": indexes
+            });
+            
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Bucket {} does not exist or is not accessible: {}", bucket, e);
+            let error_response = json!({
+                "error": format!("Bucket not found: {}", e)
+            });
+            (StatusCode::NOT_FOUND, Json(error_response))
+        }
+    }
 }
 
-async fn s3_delete_vector_bucket(bucket: String, _state: AppState) -> impl IntoResponse {
+async fn s3_delete_vector_bucket(bucket: String, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 delete-vector-bucket request for bucket: {}", bucket);
     
-    let response = json!({
-        "bucket": bucket,
-        "deleted": true,
-        "status": "success"
-    });
+    // First, try to delete all objects in the bucket
+    match state.s3.list_objects("").await {
+        Ok(objects) => {
+            for object_key in objects {
+                if let Err(e) = state.s3.delete_object(&object_key).await {
+                    tracing::warn!("Failed to delete object {}: {}", object_key, e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to list objects for deletion: {}", e);
+        }
+    }
     
-    (StatusCode::OK, Json(response))
+    // Now delete the bucket itself
+    match state.s3.client.delete_bucket().bucket(&bucket).send().await {
+        Ok(_) => {
+            tracing::info!("Successfully deleted vector bucket: {}", bucket);
+            let response = json!({
+                "bucket": bucket,
+                "deleted": true,
+                "status": "success"
+            });
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete vector bucket {}: {}", bucket, e);
+            let error_response = json!({
+                "error": format!("Failed to delete bucket: {}", e)
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        }
+    }
 }
 
-async fn s3_list_indexes(bucket: String, _state: AppState) -> impl IntoResponse {
+async fn s3_list_indexes(bucket: String, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 list-indexes request for bucket: {}", bucket);
     
-    let response = json!({
-        "bucket": bucket,
-        "indexes": [
-            {
-                "name": "default",
-                "dimension": 1536,
-                "metric": "cosine",
-                "vector_count": 0
+    // List all index configurations from S3
+    match state.s3.list_objects("indexes/").await {
+        Ok(objects) => {
+            let mut indexes = Vec::new();
+            
+            for object_key in objects {
+                if object_key.ends_with("/config.json") {
+                    if let Some(index_name) = object_key.strip_prefix("indexes/").and_then(|s| s.strip_suffix("/config.json")) {
+                        // Load the index configuration to get details
+                        match state.s3.get_object(&object_key).await {
+                            Ok(data) => {
+                                if let Ok(config) = serde_json::from_slice::<CreateIndex>(&data) {
+                                    // Count vectors for this index
+                                    let vector_prefix = format!("{}/vectors/", index_name);
+                                    let vector_count = state.s3.list_objects(&vector_prefix).await
+                                        .map(|objects| objects.len())
+                                        .unwrap_or(0);
+                                    
+                                    indexes.push(json!({
+                                        "name": index_name,
+                                        "dimension": config.dim,
+                                        "metric": config.metric,
+                                        "vector_count": vector_count
+                                    }));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to load config for index {}: {}", index_name, e);
+                            }
+                        }
+                    }
+                }
             }
-        ]
-    });
-    
-    (StatusCode::OK, Json(response))
+            
+            let response = json!({
+                "bucket": bucket,
+                "indexes": indexes
+            });
+            
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to list indexes for bucket {}: {}", bucket, e);
+            let error_response = json!({
+                "error": format!("Failed to list indexes: {}", e)
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        }
+    }
 }
 
-async fn s3_get_index(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_get_index(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 get-index request for bucket: {}, body: {:?}", bucket, body);
     
     let index_name = body.get("indexName")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
     
-    // Response must match GetIndexOutput shape with top-level "index" field
-    let response = json!({
-        "index": {
-            "vectorBucketName": bucket,
-            "indexName": index_name,
-            "indexArn": format!("arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/{}/index/{}", bucket, index_name),
-            "creationTime": "2024-01-01T00:00:00Z",
-            "dataType": "FLOAT32",
-            "dimension": 1536,
-            "distanceMetric": "COSINE"
+    // Try to load the actual index configuration from S3
+    let config_key = format!("indexes/{}/config.json", index_name);
+    match state.s3.get_object(&config_key).await {
+        Ok(data) => {
+            match serde_json::from_slice::<CreateIndex>(&data) {
+                Ok(config) => {
+                    // Count vectors for this index
+                    let vector_prefix = format!("{}/vectors/", index_name);
+                    let vector_count = state.s3.list_objects(&vector_prefix).await
+                        .map(|objects| objects.len())
+                        .unwrap_or(0);
+                    
+                    let response = json!({
+                        "index": {
+                            "vectorBucketName": bucket,
+                            "indexName": index_name,
+                            "indexArn": format!("arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/{}/index/{}", bucket, index_name),
+                            "creationTime": "2024-01-01T00:00:00Z",
+                            "dataType": "FLOAT32",
+                            "dimension": config.dim,
+                            "distanceMetric": config.metric.to_uppercase(),
+                            "vectorCount": vector_count
+                        }
+                    });
+                    
+                    (StatusCode::OK, Json(response))
+                }
+                Err(e) => {
+                    tracing::error!("Failed to parse index config for {}: {}", index_name, e);
+                    let error_response = json!({
+                        "error": format!("Failed to parse index config: {}", e)
+                    });
+                    (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+                }
+            }
         }
-    });
-    
-    (StatusCode::OK, Json(response))
+        Err(e) => {
+            tracing::error!("Index {} not found in bucket {}: {}", index_name, bucket, e);
+            let error_response = json!({
+                "error": format!("Index not found: {}", e)
+            });
+            (StatusCode::NOT_FOUND, Json(error_response))
+        }
+    }
 }
 
-async fn s3_delete_index(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_delete_index(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 delete-index request for bucket: {}, body: {:?}", bucket, body);
     
-    let index_name = body.get("index")
+    let index_name = body.get("indexName")
         .and_then(|v| v.as_str())
         .unwrap_or("default");
     
-    let response = json!({
-        "bucket": bucket,
-        "index": index_name,
-        "deleted": true,
-        "status": "success"
-    });
+    // Delete all objects associated with this index
+    let index_prefix = format!("{}/", index_name);
+    match state.s3.list_objects(&index_prefix).await {
+        Ok(objects) => {
+            for object_key in objects {
+                if let Err(e) = state.s3.delete_object(&object_key).await {
+                    tracing::warn!("Failed to delete object {}: {}", object_key, e);
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!("Failed to list objects for index {}: {}", index_name, e);
+        }
+    }
     
-    (StatusCode::OK, Json(response))
+    // Delete the index configuration
+    let config_key = format!("indexes/{}/config.json", index_name);
+    match state.s3.delete_object(&config_key).await {
+        Ok(_) => {
+            tracing::info!("Successfully deleted index: {}", index_name);
+            let response = json!({
+                "bucket": bucket,
+                "index": index_name,
+                "deleted": true,
+                "status": "success"
+            });
+            (StatusCode::OK, Json(response))
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete index config {}: {}", index_name, e);
+            let error_response = json!({
+                "error": format!("Failed to delete index: {}", e)
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response))
+        }
+    }
 }
 
-async fn s3_list_vectors(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_list_vectors(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 list-vectors request for bucket: {}, body: {:?}", bucket, body);
     
-    let index_name = body.get("index")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
+    let list_request: S3ListVectorsRequest = match serde_json::from_value(body) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!("Failed to parse list vectors request: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid request format").into_response();
+        }
+    };
     
-    let response = json!({
-        "bucket": bucket,
-        "index": index_name,
-        "vectors": [],
-        "count": 0
-    });
+    let bucket_name = &list_request.vector_bucket_name;
+    let prefix = format!("{}/vectors/", list_request.index_name);
+    let max_keys = list_request.max_results.unwrap_or(1000);
     
-    (StatusCode::OK, Json(response))
+    match state.s3.client
+        .list_objects_v2()
+        .bucket(bucket_name.clone())
+        .prefix(prefix)
+        .max_keys(max_keys as i32)
+        .continuation_token(list_request.next_token.unwrap_or_default())
+        .send()
+        .await {
+        Ok(output) => {
+            let mut vectors = Vec::new();
+            for object in output.contents.as_deref().unwrap_or_default() {
+                if let Some(key) = object.key() {
+                    if let Some(vector_id) = key.strip_prefix(&format!("{}/vectors/", list_request.index_name))
+                        .and_then(|s| s.strip_suffix(".json")) {
+                        
+                        if let Ok(get_output) = state.s3.client.get_object().bucket(bucket_name.clone()).key(key).send().await {
+                            if let Ok(data) = get_output.body.collect().await {
+                                if let Ok(vector_data) = serde_json::from_slice::<serde_json::Value>(&data.into_bytes()) {
+                                    vectors.push(json!({
+                                        "id": vector_id,
+                                        "metadata": vector_data.get("metadata").unwrap_or(&json!({}))
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            let response = json!({
+                "NextToken": output.next_continuation_token,
+                "Vectors": vectors
+            });
+            
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list vectors for index: {}", list_request.index_name);
+            (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to list vectors: {}", e)).into_response()
+        }
+    }
 }
 
-async fn s3_get_vectors(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_get_vectors(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 get-vectors request for bucket: {}, body: {:?}", bucket, body);
-    
-    let index_name = body.get("index")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
-    
-    let _vector_ids = body.get("ids")
-        .and_then(|v| v.as_array())
-        .unwrap_or(&vec![]);
-    
+
+    let req: S3GetVectorsRequest = match serde_json::from_value(body) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!("Failed to parse get vectors request: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid request format").into_response();
+        }
+    };
+
+    let mut vectors = Vec::new();
+    let mut not_found_ids = Vec::new();
+
+    for vector_id in &req.keys {
+        let vector_key = format!("{}/vectors/{}.json", req.index_name, vector_id);
+
+        match state.s3.client
+            .get_object()
+            .bucket(req.vector_bucket_name.clone())
+            .key(vector_key)
+            .send()
+            .await
+        {
+            Ok(get_output) => {
+                match get_output.body.collect().await {
+                    Ok(data) => {
+                        match serde_json::from_slice::<serde_json::Value>(&data.into_bytes()) {
+                            Ok(vector_data) => {
+                                let vector_entry = json!({
+                                    "Key": vector_id,
+                                    "Data": vector_data.get("vector").unwrap_or(&json!({})),
+                                    "Metadata": vector_data.get("metadata").unwrap_or(&json!({}))
+                                });
+                                vectors.push(vector_entry);
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to parse vector data for {}: {}", vector_id, e);
+                                not_found_ids.push(vector_id.clone());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to read vector body for {}: {}", vector_id, e);
+                        not_found_ids.push(vector_id.clone());
+                    }
+                }
+            }
+            Err(_) => {
+                not_found_ids.push(vector_id.clone());
+            }
+        }
+    }
+
     let response = json!({
-        "bucket": bucket,
-        "index": index_name,
-        "vectors": [],
-        "found": 0
+        "Vectors": vectors,
+        "NotFoundIds": not_found_ids
     });
-    
-    (StatusCode::OK, Json(response))
+
+    (StatusCode::OK, Json(response)).into_response()
 }
 
-async fn s3_delete_vectors(bucket: String, body: serde_json::Value, _state: AppState) -> impl IntoResponse {
+async fn s3_delete_vectors(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
     tracing::info!("S3 delete-vectors request for bucket: {}, body: {:?}", bucket, body);
     
-    let index_name = body.get("index")
-        .and_then(|v| v.as_str())
-        .unwrap_or("default");
+    let delete_request: S3DeleteVectorsRequest = match serde_json::from_value(body) {
+        Ok(req) => req,
+        Err(e) => {
+            tracing::error!("Failed to parse delete vectors request: {}", e);
+            return (StatusCode::BAD_REQUEST, "Invalid request format").into_response();
+        }
+    };
     
-    let vector_ids = body.get("ids")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.len())
-        .unwrap_or(0);
+    let mut deleted_ids = Vec::new();
+    let mut failed_ids = Vec::new();
+    
+    for vector_id in &delete_request.keys {
+        let vector_key = format!("{}/vectors/{}.json", delete_request.index_name, vector_id);
+        
+        match state.s3.client
+            .delete_object()
+            .bucket(delete_request.vector_bucket_name.clone())
+            .key(vector_key)
+            .send()
+            .await
+        {
+            Ok(_) => {
+                tracing::info!("Successfully deleted vector: {}", vector_id);
+                deleted_ids.push(vector_id.clone());
+            }
+            Err(e) => {
+                tracing::error!("Failed to delete vector {}: {}", vector_id, e);
+                failed_ids.push(json!({
+                    "id": vector_id,
+                    "error": format!("Deletion failed: {}", e)
+                }));
+            }
+        }
+    }
     
     let response = json!({
-        "bucket": bucket,
-        "index": index_name,
-        "deleted": vector_ids,
-        "status": "success"
+        "DeletedIds": deleted_ids,
+        "Errors": failed_ids
     });
     
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 // Direct S3 vectors handlers for specific operations
@@ -496,16 +777,34 @@ async fn s3_query_vectors_direct(
     s3_query_vectors(bucket, body, state).await
 }
 
-async fn s3_list_vector_buckets(_state: AppState) -> impl IntoResponse {
-    // Return the configured bucket as available vector bucket
-    Json(serde_json::json!({
-        "VectorBuckets": [
-            {
-                "Name": "vectors",
-                "CreationDate": "2024-01-01T00:00:00Z"
+async fn s3_list_vector_buckets(state: AppState) -> impl IntoResponse {
+    // List all buckets from S3
+    match state.s3.client.list_buckets().send().await {
+        Ok(output) => {
+            let mut buckets = Vec::new();
+            for bucket in output.buckets() {
+                if let Some(name) = bucket.name() {
+                    buckets.push(serde_json::json!({
+                        "Name": name,
+                        "CreationDate": bucket.creation_date()
+                            .map(|d| d.to_string())
+                            .unwrap_or_else(|| "2024-01-01T00:00:00Z".to_string())
+                    }));
+                }
             }
-        ]
-    })).into_response()
+            
+            Json(serde_json::json!({
+                "VectorBuckets": buckets
+            })).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list vector buckets: {}", e);
+            let error_response = json!({
+                "error": format!("Failed to list buckets: {}", e)
+            });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(error_response)).into_response()
+        }
+    }
 }
 
 async fn s3_create_index(bucket: String, body: serde_json::Value, state: AppState) -> impl IntoResponse {
@@ -558,6 +857,9 @@ async fn s3_put_vectors(_bucket: String, body: serde_json::Value, state: AppStat
     let vector_count = req.vectors.len();
     tracing::info!("Converting {} vectors to internal format", vector_count);
     
+    // Extract vector IDs/keys before moving req.vectors
+    let vector_ids: Vec<String> = req.vectors.iter().map(|v| v.key.clone()).collect();
+    
     // Load index configuration to validate metadata sizes
     let index_config = match load_index_configuration(&state.s3, &req.index_name).await {
         Ok(config) => config,
@@ -596,9 +898,10 @@ async fn s3_put_vectors(_bucket: String, body: serde_json::Value, state: AppStat
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("Ingestion failed: {}", e)).into_response();
     }
 
-    tracing::info!("Successfully ingested {} vectors to index '{}'", vector_count, req.index_name);    Json(serde_json::json!({
-        "Status": "Success",
-        "VectorCount": vector_count
+    tracing::info!("Successfully ingested {} vectors to index '{}'", vector_count, req.index_name);
+    
+    Json(serde_json::json!({
+        "VectorIds": vector_ids
     })).into_response()
 }
 

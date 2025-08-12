@@ -6,7 +6,7 @@ use tokio::fs;
 
 #[derive(Clone)]
 pub struct S3Client {
-    client: Client,
+    pub client: Client,
     bucket: String,
 }
 

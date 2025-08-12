@@ -130,8 +130,12 @@ def main():
             indexName=test_index,
             vectorBucketName=test_bucket
         )
-        vectors = response.get('Vectors', [])
-        return f"Found {len(vectors)} vectors"
+        vectors = response.get('vectors', [])
+        assert len(vectors) == 2, f"Expected 2 vectors, found {len(vectors)}"
+        vector_ids = {v['id'] for v in vectors}
+        expected_ids = {'test-vec-1', 'test-vec-2'}
+        assert vector_ids == expected_ids, f"Expected vector IDs {expected_ids}, found {vector_ids}"
+        return f"Found {len(vectors)} vectors with correct IDs"
     
     test_results['list-vectors'] = test_command('list-vectors', test_list_vectors)
     
@@ -140,10 +144,20 @@ def main():
         response = client.get_vectors(
             indexName=test_index,
             vectorBucketName=test_bucket,
-            keys=['test-vec-1']
+            keys=['test-vec-1', 'non-existent-vec']
         )
-        vectors = response.get('Vectors', [])
-        return f"Retrieved {len(vectors)} vectors"
+        vectors = response.get('vectors', [])
+        not_found = response.get('notFoundIds', [])
+        
+        assert len(vectors) == 1, f"Expected 1 vector, found {len(vectors)}"
+        assert vectors[0]['id'] == 'test-vec-1', f"Expected vector with id 'test-vec-1', got {vectors[0]['id']}"
+        assert 'vector' in vectors[0], "Vector data missing from response"
+        assert 'metadata' in vectors[0], "Vector metadata missing from response"
+        
+        assert len(not_found) == 1, f"Expected 1 not found ID, got {len(not_found)}"
+        assert not_found[0] == 'non-existent-vec', "Incorrect not found ID"
+        
+        return f"Retrieved 1 vector and correctly identified 1 not found vector"
     
     test_results['get-vectors'] = test_command('get-vectors', test_get_vectors)
     
@@ -165,9 +179,18 @@ def main():
         response = client.delete_vectors(
             indexName=test_index,
             vectorBucketName=test_bucket,
-            keys=['test-vec-1']
+            keys=['test-vec-1', 'test-vec-2']
         )
-        return f"Deleted vectors"
+        deleted_ids = response.get('deletedIds', [])
+        assert len(deleted_ids) == 2, f"Expected 2 deleted IDs, got {len(deleted_ids)}"
+        assert set(deleted_ids) == {'test-vec-1', 'test-vec-2'}, "Incorrect deleted IDs"
+        
+        # Verify deletion
+        verify_response = client.get_vectors(indexName=test_index, vectorBucketName=test_bucket, keys=['test-vec-1'])
+        assert len(verify_response.get('vectors', [])) == 0, "Deleted vector should not be found"
+        assert len(verify_response.get('notFoundIds', [])) == 1, "Deleted vector should be in notFoundIds"
+        
+        return f"Deleted {len(deleted_ids)} vectors and verified deletion"
     
     test_results['delete-vectors'] = test_command('delete-vectors', test_delete_vectors)
     
