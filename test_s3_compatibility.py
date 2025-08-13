@@ -90,7 +90,7 @@ def main():
         response = client.create_index(
             vectorBucketName=test_bucket,
             indexName=test_index,
-            dimension=1536,
+            dimension=4,  # Match test vector dimension
             distanceMetric='COSINE',
             dataType='FLOAT32'  # Required parameter
         )

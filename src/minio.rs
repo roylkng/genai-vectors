@@ -103,6 +103,24 @@ impl S3Client {
         self.put_object(key, data).await
     }
 
+    pub async fn list_buckets(&self) -> Result<Vec<String>> {
+        let response = self.client
+            .list_buckets()
+            .send()
+            .await
+            .context("Failed to list buckets")?;
+        
+        let mut bucket_names = Vec::new();
+        if let Some(buckets) = response.buckets {
+            for bucket in buckets {
+                if let Some(name) = bucket.name {
+                    bucket_names.push(name);
+                }
+            }
+        }
+        Ok(bucket_names)
+    }
+
     pub async fn list_objects(&self, prefix: &str) -> Result<Vec<String>> {
         let response = self.client
             .list_objects_v2()

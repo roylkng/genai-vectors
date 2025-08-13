@@ -51,6 +51,10 @@ tracing-subscriber = "0.3"
 aws-config  = { version = "1.0", optional = true }
 aws-sdk-s3  = { version = "1.0", features = ["behavior-version-latest"], optional = true }
 
+# Parquet support for efficient slice storage
+parquet = { version = "56.0.0", features = ["arrow"] }
+arrow = { version = "56.0.0", features = ["json"] }
+
 [dev-dependencies]
 tokio-test = "0.4"
 
