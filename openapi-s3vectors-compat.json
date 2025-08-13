@@ -1,0 +1,1440 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "S3 Vectors (compat)",
+    "version": "2025-08-12",
+    "description": "OpenAPI for a self-hosted S3 Vectors\u2013compatible API surface. Shapes align to boto3 s3vectors 1.40.x. Auth/signing is out of scope; this document focuses on request/response shapes only."
+  },
+  "servers": [
+    {
+      "url": "https://your-endpoint.example.com",
+      "description": "Your S3 Vectors\u2013compatible endpoint"
+    }
+  ],
+  "paths": {
+    "/CreateVectorBucket": {
+      "post": {
+        "operationId": "CreateVectorBucket",
+        "summary": "Creates a vector bucket.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vectorBucket": {
+                      "$ref": "#/components/schemas/VectorBucketSummary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vectorBucketName"
+                ],
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "encryptionType": {
+                    "type": "string",
+                    "nullable": true
+                  },
+                  "kmsKeyArn": {
+                    "type": "string",
+                    "nullable": true
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1"
+          },
+          "response": {
+            "vectorBucket": {
+              "vectorBucketName": "docs-vb-1",
+              "vectorBucketArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1",
+              "creationTime": "2025-07-01T12:34:56Z"
+            }
+          }
+        }
+      }
+    },
+    "/GetVectorBucket": {
+      "post": {
+        "operationId": "GetVectorBucket",
+        "summary": "Returns attributes for a vector bucket.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vectorBucket": {
+                      "$ref": "#/components/schemas/VectorBucketSummary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "vectorBucketArn": {
+                    "type": "string"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "vectorBucketArn"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1"
+          },
+          "response": {
+            "vectorBucket": {
+              "vectorBucketName": "docs-vb-1",
+              "vectorBucketArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1",
+              "creationTime": "2025-07-01T12:34:56Z"
+            }
+          }
+        }
+      }
+    },
+    "/ListVectorBuckets": {
+      "post": {
+        "operationId": "ListVectorBuckets",
+        "summary": "Lists vector buckets.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextToken": {
+                      "type": "string"
+                    },
+                    "vectorBuckets": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/VectorBucketSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "maxResults": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                  },
+                  "nextToken": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "maxResults": 100
+          },
+          "response": {
+            "nextToken": "abcd",
+            "vectorBuckets": [
+              {
+                "vectorBucketName": "docs-vb-1",
+                "vectorBucketArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1",
+                "creationTime": "2025-07-01T12:34:56Z"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "/PutVectorBucketPolicy": {
+      "post": {
+        "operationId": "PutVectorBucketPolicy",
+        "summary": "Attaches/updates a vector bucket policy.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vectorBucketName",
+                  "policy"
+                ],
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "policy": {
+                    "$ref": "#/components/schemas/Document"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1",
+            "policy": {
+              "Version": "2012-10-17",
+              "Statement": []
+            }
+          }
+        }
+      }
+    },
+    "/GetVectorBucketPolicy": {
+      "post": {
+        "operationId": "GetVectorBucketPolicy",
+        "summary": "Returns a vector bucket policy.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "policy": {
+                      "$ref": "#/components/schemas/Document"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vectorBucketName"
+                ],
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1"
+          },
+          "response": {
+            "policy": {
+              "Version": "2012-10-17",
+              "Statement": []
+            }
+          }
+        }
+      }
+    },
+    "/DeleteVectorBucketPolicy": {
+      "post": {
+        "operationId": "DeleteVectorBucketPolicy",
+        "summary": "Deletes a vector bucket policy.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vectorBucketName"
+                ],
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1"
+          }
+        }
+      }
+    },
+    "/DeleteVectorBucket": {
+      "post": {
+        "operationId": "DeleteVectorBucket",
+        "summary": "Deletes a vector bucket (bucket must be empty).",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "vectorBucketArn": {
+                    "type": "string"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "vectorBucketArn"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1"
+          }
+        }
+      }
+    },
+    "/CreateIndex": {
+      "post": {
+        "operationId": "CreateIndex",
+        "summary": "Creates a vector index in a vector bucket.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "index": {
+                      "$ref": "#/components/schemas/IndexSummary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vectorBucketName",
+                  "indexName",
+                  "dimension",
+                  "distanceMetric"
+                ],
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "dimension": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 4096
+                  },
+                  "distanceMetric": {
+                    "type": "string",
+                    "enum": [
+                      "euclidean",
+                      "cosine"
+                    ]
+                  },
+                  "dataType": {
+                    "type": "string",
+                    "enum": [
+                      "float32"
+                    ],
+                    "default": "float32"
+                  },
+                  "metadataConfiguration": {
+                    "type": "object",
+                    "properties": {
+                      "nonFilterableMetadataKeys": {
+                        "type": "array",
+                        "items": {
+                          "type": "string"
+                        }
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1",
+            "indexName": "docs-idx-1",
+            "dimension": 768,
+            "distanceMetric": "cosine",
+            "metadataConfiguration": {
+              "nonFilterableMetadataKeys": [
+                "text_chunk"
+              ]
+            }
+          },
+          "response": {
+            "index": {
+              "vectorBucketName": "docs-vb-1",
+              "indexName": "docs-idx-1",
+              "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+              "creationTime": "2025-07-01T13:00:00Z",
+              "dataType": "float32",
+              "dimension": 768,
+              "distanceMetric": "cosine",
+              "metadataConfiguration": {
+                "nonFilterableMetadataKeys": [
+                  "text_chunk"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/GetIndex": {
+      "post": {
+        "operationId": "GetIndex",
+        "summary": "Returns index attributes.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "index": {
+                      "$ref": "#/components/schemas/IndexSummary"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1",
+            "indexName": "docs-idx-1"
+          },
+          "response": {
+            "index": {
+              "vectorBucketName": "docs-vb-1",
+              "indexName": "docs-idx-1",
+              "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+              "creationTime": "2025-07-01T13:00:00Z",
+              "dataType": "float32",
+              "dimension": 768,
+              "distanceMetric": "cosine",
+              "metadataConfiguration": {
+                "nonFilterableMetadataKeys": [
+                  "text_chunk"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "/ListIndexes": {
+      "post": {
+        "operationId": "ListIndexes",
+        "summary": "Lists indexes in a vector bucket.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextToken": {
+                      "type": "string"
+                    },
+                    "indexes": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/IndexSummary"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "vectorBucketName"
+                ],
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "maxResults": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 500
+                  },
+                  "nextToken": {
+                    "type": "string"
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1",
+            "maxResults": 100
+          },
+          "response": {
+            "nextToken": "more",
+            "indexes": [
+              {
+                "vectorBucketName": "docs-vb-1",
+                "indexName": "docs-idx-1",
+                "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+                "creationTime": "2025-07-01T13:00:00Z",
+                "dataType": "float32",
+                "dimension": 768,
+                "distanceMetric": "cosine",
+                "metadataConfiguration": {
+                  "nonFilterableMetadataKeys": [
+                    "text_chunk"
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "/DeleteIndex": {
+      "post": {
+        "operationId": "DeleteIndex",
+        "summary": "Deletes a vector index.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "vectorBucketName": "docs-vb-1",
+            "indexName": "docs-idx-1"
+          }
+        }
+      }
+    },
+    "/PutVectors": {
+      "post": {
+        "operationId": "PutVectors",
+        "summary": "Inserts or upserts vectors into an index.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  },
+                  "vectors": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/VectorWriteItem"
+                    },
+                    "minItems": 1,
+                    "maxItems": 500
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName",
+                      "vectors"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn",
+                      "vectors"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+            "vectors": [
+              {
+                "key": "doc-1",
+                "data": {
+                  "float32": [
+                    0.1,
+                    0.2,
+                    0.3
+                  ]
+                },
+                "metadata": {
+                  "title": "hello"
+                }
+              },
+              {
+                "key": "doc-2",
+                "data": {
+                  "float32": [
+                    0.2,
+                    0.1,
+                    0.4
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "/GetVectors": {
+      "post": {
+        "operationId": "GetVectors",
+        "summary": "Returns vectors by key.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vectors": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/VectorReadItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  },
+                  "keys": {
+                    "$ref": "#/components/schemas/VectorKeyList"
+                  },
+                  "returnData": {
+                    "type": "boolean"
+                  },
+                  "returnMetadata": {
+                    "type": "boolean"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName",
+                      "keys"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn",
+                      "keys"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+            "keys": [
+              "doc-1",
+              "doc-2"
+            ],
+            "returnData": true,
+            "returnMetadata": true
+          },
+          "response": {
+            "vectors": [
+              {
+                "key": "doc-1",
+                "data": {
+                  "float32": [
+                    0.1,
+                    0.2,
+                    0.3
+                  ]
+                },
+                "metadata": {
+                  "title": "hello"
+                }
+              },
+              {
+                "key": "doc-2",
+                "data": {
+                  "float32": [
+                    0.2,
+                    0.1,
+                    0.4
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "/DeleteVectors": {
+      "post": {
+        "operationId": "DeleteVectors",
+        "summary": "Deletes vectors by key.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {}
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  },
+                  "keys": {
+                    "$ref": "#/components/schemas/VectorKeyList"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName",
+                      "keys"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn",
+                      "keys"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+            "keys": [
+              "doc-2"
+            ]
+          }
+        }
+      }
+    },
+    "/ListVectors": {
+      "post": {
+        "operationId": "ListVectors",
+        "summary": "Lists vectors in an index (supports parallel listing).",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "nextToken": {
+                      "type": "string"
+                    },
+                    "vectors": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/VectorReadItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  },
+                  "maxResults": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 1000
+                  },
+                  "nextToken": {
+                    "type": "string"
+                  },
+                  "segmentCount": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 16
+                  },
+                  "segmentIndex": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "returnData": {
+                    "type": "boolean"
+                  },
+                  "returnMetadata": {
+                    "type": "boolean"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+            "maxResults": 500,
+            "returnData": true,
+            "returnMetadata": true
+          },
+          "response": {
+            "nextToken": "abc",
+            "vectors": [
+              {
+                "key": "doc-1",
+                "data": {
+                  "float32": [
+                    0.1,
+                    0.2,
+                    0.3
+                  ]
+                },
+                "metadata": {
+                  "title": "hello"
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "/QueryVectors": {
+      "post": {
+        "operationId": "QueryVectors",
+        "summary": "Queries approximate nearest neighbors from an index.",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "vectors": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/VectorQueryItem"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "vectorBucketName": {
+                    "type": "string"
+                  },
+                  "indexName": {
+                    "type": "string"
+                  },
+                  "indexArn": {
+                    "type": "string"
+                  },
+                  "topK": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 30
+                  },
+                  "queryVector": {
+                    "$ref": "#/components/schemas/VectorData"
+                  },
+                  "filter": {
+                    "$ref": "#/components/schemas/Document"
+                  },
+                  "returnMetadata": {
+                    "type": "boolean"
+                  },
+                  "returnDistance": {
+                    "type": "boolean"
+                  }
+                },
+                "oneOf": [
+                  {
+                    "required": [
+                      "vectorBucketName",
+                      "indexName",
+                      "topK",
+                      "queryVector"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "indexArn",
+                      "topK",
+                      "queryVector"
+                    ]
+                  }
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "x-examples": {
+          "request": {
+            "indexArn": "arn:aws:s3vectors:us-east-1:123456789012:vector-bucket/docs-vb-1/index/docs-idx-1",
+            "topK": 10,
+            "queryVector": {
+              "float32": [
+                0.1,
+                0.2,
+                0.3
+              ]
+            },
+            "returnDistance": true,
+            "returnMetadata": true,
+            "filter": {
+              "and": [
+                {
+                  "==": [
+                    {
+                      "var": "language"
+                    },
+                    "en"
+                  ]
+                }
+              ]
+            }
+          },
+          "response": {
+            "vectors": [
+              {
+                "key": "doc-1",
+                "distance": 0.12,
+                "metadata": {
+                  "language": "en"
+                }
+              }
+            ]
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "VectorData": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "float32": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "Vector values as 32\u2011bit floats. Length must equal index.dimension."
+          }
+        },
+        "description": "Tagged union. Only 'float32' is allowed for now."
+      },
+      "Document": {
+        "description": "Arbitrary JSON. Matches boto3 'document' type.",
+        "oneOf": [
+          {
+            "type": "object",
+            "additionalProperties": true
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Document"
+            }
+          },
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "integer"
+          },
+          {
+            "type": "boolean"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "VectorWriteItem": {
+        "type": "object",
+        "required": [
+          "key",
+          "data"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/VectorData"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Document",
+            "description": "Optional metadata. Up to 40 KB total; filterable metadata limits apply."
+          }
+        }
+      },
+      "VectorReadItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/VectorData"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Document"
+          }
+        }
+      },
+      "VectorQueryItem": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "data": {
+            "$ref": "#/components/schemas/VectorData"
+          },
+          "metadata": {
+            "$ref": "#/components/schemas/Document"
+          },
+          "distance": {
+            "type": "number"
+          }
+        }
+      },
+      "IndexSummary": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "vectorBucketName": {
+            "type": "string"
+          },
+          "indexName": {
+            "type": "string"
+          },
+          "indexArn": {
+            "type": "string"
+          },
+          "creationTime": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dataType": {
+            "type": "string",
+            "enum": [
+              "float32"
+            ]
+          },
+          "dimension": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          },
+          "distanceMetric": {
+            "type": "string",
+            "enum": [
+              "euclidean",
+              "cosine"
+            ]
+          },
+          "metadataConfiguration": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "nonFilterableMetadataKeys": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "VectorBucketSummary": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "vectorBucketName": {
+            "type": "string"
+          },
+          "vectorBucketArn": {
+            "type": "string"
+          },
+          "creationTime": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "VectorKeyList": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "minItems": 1
+      }
+    },
+    "parameters": {
+      "VectorBucketName": {
+        "name": "vectorBucketName",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IndexName": {
+        "name": "indexName",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      },
+      "IndexArn": {
+        "name": "indexArn",
+        "in": "query",
+        "schema": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
