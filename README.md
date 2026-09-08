@@ -2,6 +2,8 @@
 
 An experimental vector-search service in Rust that explores an **S3 Vectors-style API over FAISS-backed indexes and object storage**.
 
+Maintained by [Rajan Kadeval](https://github.com/roylkng). This is an independent open-source systems experiment.
+
 The project is deliberately infrastructure-oriented: clients talk to a familiar bucket/index/vector API while the service owns indexing, metadata, persistence, and query execution behind that boundary.
 
 > **Status:** research / prototype. The repository contains a compatibility harness covering the 13 S3 Vectors operations implemented here. It is not presented as a drop-in production replacement for AWS S3 Vectors, and no performance claim is made without a reproducible benchmark.
