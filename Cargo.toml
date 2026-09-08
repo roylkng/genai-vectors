@@ -2,9 +2,9 @@
 name = "genai-vectors"
 version = "0.1.0"
 edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
-description = "A production-grade vector database for similarity search"
-repository = "https://github.com/your-org/genai-vectors"
+authors = ["Rajan Kadeval"]
+description = "Experimental S3 Vectors-style vector search service backed by FAISS and object storage"
+repository = "https://github.com/roylkng/genai-vectors"
 license = "MIT"
 readme = "README.md"
 keywords = ["vector", "database", "similarity", "search", "ai"]
@@ -19,22 +19,17 @@ name = "genai_vectors"
 path = "src/lib.rs"
 
 [dependencies]
-# Real Faiss integration for production
 faiss = { version = "0.12.1", default-features = false, features = ["static"] }
 
-# Error handling
 anyhow = "1.0"
 thiserror = "1.0"
 
-# Web framework
 axum        = { version = "0.7", features = ["json", "macros"] }
 tokio       = { version = "1.38", features = ["rt-multi-thread", "macros"] }
 
-# Serialization
 serde       = { version = "1.0", features = ["derive"] }
 serde_json  = "1.0"
 
-# Utilities
 uuid        = { version = "1", features = ["v4"] }
 chrono      = { version = "0.4.31", features = ["serde"] }
 clap        = { version = "4.0", features = ["derive"] }
@@ -43,15 +38,12 @@ regex       = "1.10"
 num_cpus    = "1.0"
 futures     = "0.3"
 
-# Logging
 tracing     = "0.1"
 tracing-subscriber = "0.3"
 
-# S3-compatible client (MinIO or AWS)
 aws-config  = { version = "1.0", optional = true }
 aws-sdk-s3  = { version = "1.0", features = ["behavior-version-latest"], optional = true }
 
-# Parquet support for efficient slice storage
 parquet = { version = "56.0.0", features = ["arrow"] }
 arrow = { version = "56.0.0", features = ["json"] }
 
@@ -61,6 +53,3 @@ tokio-test = "0.4"
 [features]
 default = ["s3"]
 s3 = ["aws-sdk-s3", "aws-config"]
-
-
-
